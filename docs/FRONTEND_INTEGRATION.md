@@ -17,10 +17,11 @@
 6. [模块四：消息发送与拉取 (Messages)](#6-模块四消息发送与拉取-messages)
 7. [模块五：消息确认机制 (Delivery &amp; Read ACK)](#7-模块五消息确认机制-delivery--read-ack)
 8. [模块六：语音消息上传与播放 (Voice &amp; R2)](#8-模块六语音消息上传与播放-voice--r2)
-9. [模块七：阅后即焚 (Burn-on-Read) 与消息过期 (TTL)](#9-模块七阅后即焚-burn-on-read-与消息过期-ttl)
-10. [模块八：增量全局同步引擎 (Incremental Sync)](#10-模块八增量全局同步引擎-incremental-sync)
-11. [前端 TypeScript 类型定义汇总](#11-前端-typescript-类型定义汇总)
-12. [完整前端集成示例代码 (TypeScript SDK)](#12-完整前端集成示例代码-typescript-sdk)
+9. [模块七：图片与文件消息上传与下载 (Images, Files &amp; R2)](#9-模块七图片与文件消息上传与下载-images-files--r2)
+10. [模块八：阅后即焚 (Burn-on-Read) 与消息过期 (TTL)](#10-模块八阅后即焚-burn-on-read-与消息过期-ttl)
+11. [模块九：增量全局同步引擎 (Incremental Sync)](#11-模块九增量全局同步引擎-incremental-sync)
+12. [前端 TypeScript 类型定义汇总](#12-前端-typescript-类型定义汇总)
+13. [完整前端集成示例代码 (TypeScript SDK)](#13-完整前端集成示例代码-typescript-sdk)
 
 ---
 
@@ -28,7 +29,7 @@
 
 1. **单节点无状态 Worker + D1 关系型存储 + R2 对象存储**：
    - 关系数据（用户、会话、成员、消息、回执、元数据）存储在 Cloudflare D1（SQLite）。
-   - 语音音频二进制文件存储在 Cloudflare R2。
+   - 多媒体二进制文件（语音音频、图片、文件附件）存储在 Cloudflare R2。
 2. **Web3 身份标准**：
    - 用户身份通过 EVM 钱包地址识别。
    - 所有地址入库时强制格式化为小写 `0x...`。
@@ -38,9 +39,9 @@
    - 接收方客户端获取消息后，须主动调用 `POST /messages/:id/ack`（投递确认，状态转为 `delivered`）。
    - 用户点击或查看消息后，须主动调用 `POST /messages/:id/read`（已读确认，状态转为 `read`）。
 4. **双重物理销毁 (Dual-Storage Burn-on-Read)**：
-   - 设置为 `retention: "on_read"` 的消息在被接收方调用已读接口后，服务端会**立即同时从 D1 数据库删除消息记录**并**从 R2 存储桶中物理删除音频文件**。
+   - 设置为 `retention: "on_read"` 的消息在被接收方调用已读接口后，服务端会**立即同时从 D1 数据库删除消息记录**并**从 R2 存储桶中物理删除对应的多媒体文件（音频/图片/文件）**。
 5. **增量拉取与同步 (Sync)**：
-   - 推荐使用增量拉取端点 `GET WORKER_BASE_URL/sync?since=<timestamp>`，根据时间戳仅同步新增变更，大幅优化客户端性能与流量。
+   - 推荐使用增量拉取端点 `GET WORKER_BASE_URL/sync?since=<timestamp>`，根据时间戳仅同步新增变更，并自动关联媒体元数据，大幅优化客户端性能与流量。
 
 ---
 
@@ -434,14 +435,63 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
         "delivered_at": null,
         "read_at": null,
         "created_at": 1788587857000
+      },
+      {
+        "id": "img-msg-uuid",
+        "conversation_id": "direct:0x1610725056c027d5ae4e2fce73bb925c82c59eaa:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+        "sender_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+        "sender_address": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+        "type": "image",
+        "content": "Architecture Diagram",
+        "retention": "permanent",
+        "status": "pending",
+        "expires_at": 1788674257000,
+        "delivered_at": null,
+        "read_at": null,
+        "created_at": 1788587860000,
+        "image": {
+          "id": "img-meta-uuid",
+          "message_id": "img-msg-uuid",
+          "object_key": "images/img-msg-uuid.png",
+          "file_name": "diagram.png",
+          "mime_type": "image/png",
+          "size": 1048576,
+          "width": 1920,
+          "height": 1080,
+          "created_at": 1788587860000
+        }
+      },
+      {
+        "id": "file-msg-uuid",
+        "conversation_id": "direct:0x1610725056c027d5ae4e2fce73bb925c82c59eaa:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+        "sender_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+        "sender_address": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+        "type": "file",
+        "content": "Protocol Spec (whitepaper.pdf)",
+        "retention": "permanent",
+        "status": "pending",
+        "expires_at": 1788674257000,
+        "delivered_at": null,
+        "read_at": null,
+        "created_at": 1788587862000,
+        "file": {
+          "id": "file-meta-uuid",
+          "message_id": "file-msg-uuid",
+          "object_key": "files/file-msg-uuid/whitepaper.pdf",
+          "file_name": "whitepaper.pdf",
+          "mime_type": "application/pdf",
+          "size": 4194304,
+          "created_at": 1788587862000
+        }
       }
     ],
-    "next_cursor": "36037617-81d9-4226-aecc-317d53dabd7a",
+    "next_cursor": "file-msg-uuid",
     "has_more": false
   }
   ```
 
   - `sender_address`：服务端自动关联了发送者的钱包地址，前端无需二次查询。
+  - `image` / `file` / `voice`：当消息为对应媒体类型时，服务端自动关联元数据对象，前端可直接读取尺寸、文件名称与大小等，无需额外查询。
   - `has_more`：布尔值，为 `true` 时前端可使用 `next_cursor` 作为下一次请求的 `after_id`。
 
 ---
@@ -563,7 +613,9 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`（必须为该会话成员）
 - **群聊 1:N 聚合判定规则**：
   - **全员送达 (`all_delivered`)**：当且仅当群内所有其他成员都上报了 `delivered` 回执时为 `true`；此时主消息 `messages.status` 才会流转为 `"delivered"`。
-  - **群聊阅后即焚 (`on_read`)**：只有当所有成员均已完成阅读 (`all_read === true`)，服务端才真正触发 D1 + R2 物理销毁；只要还有成员未读，其他成员阅读后返回 `"read"`，消息保留至全员读完或 `expires_at` 超时被 cron 强制销毁。
+  - **群聊阅后即焚 (`on_read`)**：遵循「**每人即读即焚 (Per-Recipient Burn) + 全员物理擦除 (All-Read Dual Destruction)**」机制：
+    - 对已读成员：调用 `/messages/:id/read` 统一返回 `"status": "burned"`，且后续该成员调用 `/messages`、`/sync` 或 `/voice` 时服务端自动屏蔽已读的 `on_read` 消息（防复现与防重放）；
+    - 对服务端与未读成员：消息在 D1/R2 中为未读成员保留，直到所有接收者均完成阅读 (`all_read === true`)，服务端才真正触发 D1 + R2 物理销毁。若超时未全员阅读，由 `expires_at` cron 定时任务兜底擦除。
 - **成功响应 (`HTTP 200`)**：
   ```json
   {
@@ -698,38 +750,231 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   }
   ```
 
+### 8.4 查询语音元数据 (GET /voice/:messageId/meta)
+
+- **接口路径**：`GET WORKER_BASE_URL/voice/:messageId/meta`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
+- **成功响应 (`HTTP 200`)**：返回音频时长、大小、MIME 等元数据 JSON（格式同上传时返回的 `voice` 对象），无需下载音频二进制文件即可感知时长。
+
 ---
 
-## 9. 模块七：阅后即焚 (Burn-on-Read) 与消息过期 (TTL)
+## 9. 模块七：图片与文件消息上传与下载 (Images, Files & R2)
 
-### 9.1 阅后即焚生命周期流转
+图片与文件二进制存储在 Cloudflare R2，支持阅后即焚、TTL 过期自动清理与增量同步自动挂载元数据。
 
-1. **发送消息**：发送者指定 `retention: "on_read"`。
-2. **拉取与展示**：接收方拉取到消息，UI 上可展示“阅后即焚音频”或“一次性密文”占位符。
-3. **播放/查看**：
-   - 客户端调用 `GET WORKER_BASE_URL/voice/:messageId` 下载并播放音频。
-   - 播放完毕后（或用户点击已读时），客户端调用 `POST WORKER_BASE_URL/messages/:id/read`。
-4. **双重物理擦除**：
-   - 服务端拦截到该消息 `retention == "on_read"`，立即：
-     1. 从 R2 存储桶彻底删除 `voice/<messageId>.<ext>` 对象。
-     2. 从 D1 `messages` 表直接 `DELETE`（数据库外键级联清理 `voice_messages` 和 `message_receipts` 记录）。
-   - 接口返回 `{ success: true, status: "burned" }`。
-5. **后续访问**：
-   - 任何端再次请求该音频或消息均直接返回 `HTTP 404 Not Found`。
+- **图片规格**：支持 `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `image/svg+xml`, `image/bmp`, `image/heic`, `image/avif`，单文件上限 **20MB**。
+- **文件规格**：支持任意文件格式（PDF, DOC, ZIP, TXT 等），单文件上限 **50MB**。
 
-### 9.2 TTL 自动过期与后台清理
+### 9.1 图片消息上传 (POST /images/upload)
+
+支持 `multipart/form-data`（浏览器 File 对象）与 `application/json`（Base64 字符串）。
+
+#### 方式一：FormData 上传 (推荐)
+- **请求路径**：`POST WORKER_BASE_URL/images/upload`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
+- **请求格式**：`multipart/form-data`
+- **表单字段**：
+  - `conversation_id` (文本，必填)：所属会话 ID
+  - `file` 或 `image` (二进制文件，必填)：图片 File / Blob
+  - `caption` 或 `content` (文本，可选)：图片说明文字
+  - `width` (数字，可选)：图片宽度 (像素)
+  - `height` (数字，可选)：图片高度 (像素)
+  - `retention` (文本，可选)：`"permanent"` (默认) 或 `"on_read"` (阅后即焚)
+  - `expires_in_seconds` (数字，可选)：过期时间（秒）
+- **成功响应 (`HTTP 201`)**：
+  ```json
+  {
+    "message": {
+      "id": "img-msg-uuid",
+      "conversation_id": "direct:0x1610...:0x2c3d...",
+      "sender_id": "0x1610...",
+      "type": "image",
+      "content": "Architecture Diagram",
+      "retention": "permanent",
+      "status": "pending",
+      "expires_at": 1788674257000,
+      "delivered_at": null,
+      "read_at": null,
+      "created_at": 1788587857000
+    },
+    "image": {
+      "id": "img-meta-uuid",
+      "message_id": "img-msg-uuid",
+      "object_key": "images/img-msg-uuid.png",
+      "file_name": "diagram.png",
+      "mime_type": "image/png",
+      "size": 1048576,
+      "width": 1920,
+      "height": 1080,
+      "created_at": 1788587857000
+    }
+  }
+  ```
+
+#### 方式二：Base64 上传
+- **请求路径**：`POST WORKER_BASE_URL/images/upload`
+- **请求体 (application/json)**：
+  ```json
+  {
+    "conversation_id": "direct:0x1610...:0x2c3d...",
+    "image_base64": "iVBORw0KGgoAAAANSUhEUgAA...",
+    "mime_type": "image/png",
+    "file_name": "screenshot.png",
+    "caption": "Screenshot",
+    "width": 1280,
+    "height": 720,
+    "retention": "permanent"
+  }
+  ```
+
+### 9.2 图片查看与流式下载 (GET /images/:messageId)
+
+- **接口路径**：`GET WORKER_BASE_URL/images/:messageId`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
+- **响应头**：
+  - `Content-Type`: 原始图片 MIME（如 `image/png`）
+  - `Content-Disposition`: `inline; filename="photo.png"`（浏览器可直接内联展示）
+  - `Cache-Control`: `no-store, no-cache, must-revalidate`
+- **元数据单独查询**：`GET WORKER_BASE_URL/images/:messageId/meta` 返回图片详细信息 JSON。
+- **前端图片展示代码示例**：
+  ```typescript
+  // 使用 fetch 携带 Authorization 头下载图片 Blob 并生成预览链接
+  async function renderSecureImage(messageId: string, token: string): Promise<string> {
+    const res = await fetch(`WORKER_BASE_URL/images/${messageId}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error("Image unavailable or burned");
+    const blob = await res.blob();
+    return URL.createObjectURL(blob); // 可直接赋值给 <img src={url} />
+  }
+  ```
+
+---
+
+### 9.3 文件消息上传 (POST /files/upload)
+
+#### 方式一：FormData 上传 (推荐)
+- **请求路径**：`POST WORKER_BASE_URL/files/upload`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
+- **请求格式**：`multipart/form-data`
+- **表单字段**：
+  - `conversation_id` (文本，必填)
+  - `file` (二进制文件，必填)
+  - `file_name` (文本，可选，默认取文件本身名称)
+  - `caption` 或 `content` (文本，可选)
+  - `retention` (文本，可选)：`"permanent"` 或 `"on_read"`
+  - `expires_in_seconds` (数字，可选)
+- **成功响应 (`HTTP 201`)**：
+  ```json
+  {
+    "message": {
+      "id": "file-msg-uuid",
+      "conversation_id": "direct:0x1610...:0x2c3d...",
+      "sender_id": "0x1610...",
+      "type": "file",
+      "content": "Protocol Spec (whitepaper.pdf)",
+      "retention": "permanent",
+      "status": "pending",
+      "expires_at": 1788674257000,
+      "delivered_at": null,
+      "read_at": null,
+      "created_at": 1788587857000
+    },
+    "file": {
+      "id": "file-meta-uuid",
+      "message_id": "file-msg-uuid",
+      "object_key": "files/file-msg-uuid/whitepaper.pdf",
+      "file_name": "whitepaper.pdf",
+      "mime_type": "application/pdf",
+      "size": 4194304,
+      "created_at": 1788587857000
+    }
+  }
+  ```
+
+#### 方式二：Base64 上传
+- **请求路径**：`POST WORKER_BASE_URL/files/upload`
+- **请求体 (application/json)**：
+  ```json
+  {
+    "conversation_id": "direct:0x1610...:0x2c3d...",
+    "file_base64": "JVBERi0xLjQK...",
+    "file_name": "whitepaper.pdf",
+    "mime_type": "application/pdf",
+    "caption": "Protocol Spec"
+  }
+  ```
+
+### 9.4 文件流式下载与另存为 (GET /files/:messageId)
+
+- **接口路径**：`GET WORKER_BASE_URL/files/:messageId`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
+- **响应头**：
+  - `Content-Type`: 文件 MIME 类型
+  - `Content-Disposition`: `attachment; filename="whitepaper.pdf"; filename*=UTF-8''whitepaper.pdf`（触发浏览器标准另存为下载）
+  - `Cache-Control`: `no-store, no-cache, must-revalidate`
+- **元数据单独查询**：`GET WORKER_BASE_URL/files/:messageId/meta` 返回文件详细信息 JSON。
+- **前端文件另存为下载代码示例**：
+  ```typescript
+  // 使用 fetch 携带 Authorization 头下载文件 Blob 并触发浏览器下载
+  async function downloadSecureFile(messageId: string, fileName: string, token: string) {
+    const res = await fetch(`WORKER_BASE_URL/files/${messageId}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error("File unavailable or burned");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+  ```
+
+---
+
+## 10. 模块八：阅后即焚 (Burn-on-Read) 与消息过期 (TTL)
+
+### 10.1 阅后即焚生命周期流转 (1v1 私聊 与 1:N 群聊)
+
+1. **发送消息**：发送者指定 `retention: "on_read"`（支持文本、语音、图片、文件所有类型消息）。
+2. **拉取与展示**：接收方拉取到消息，UI 上展示“阅后即焚”占位符与标识。
+3. **播放/查看与已读上报**：
+   - 客户端查看文本，或调用 `GET WORKER_BASE_URL/voice/:id`、`GET WORKER_BASE_URL/images/:id`、`GET WORKER_BASE_URL/files/:id` 下载内容。
+   - 用户阅读完毕或查看结束后，客户端主动调用 `POST WORKER_BASE_URL/messages/:id/read`。
+4. **即时返回 `burned` 状态（前端体验一致）**：
+   - 无论 1v1 私聊还是群聊，服务端成功记录已读后，均返回：
+     ```json
+     {
+       "success": true,
+       "message_id": "b315c4ec-d41f-48bb-b1dc-9a85f39cce93",
+       "status": "burned"
+     }
+     ```
+   - 前端接收到 `"status": "burned"` 后，可立即在当前设备上触发销毁动画并抹除本地该条消息。
+5. **已读用户的服务端防护（防死灰复燃与防重放）**：
+   - 已读成员后续请求 `/conversations/:id/messages` 或增量同步 `/sync` 时，服务端自动在 SQL 层排除该成员已读的 `on_read` 消息，刷新聊天界面绝不再现。
+   - 已读成员后续再次请求 `/voice/:messageId`、`/images/:messageId` 或 `/files/:messageId` 下载媒体流时，服务端直接返回 `HTTP 404`（已焚毁）。
+6. **服务端的彻底双重物理擦除 (Dual Destruction)**：
+   - **1v1 私聊**：单个接收方阅读后，即视为全员阅读，立即执行 D1 `messages` 表行物理删除与 R2 媒体对象（音频/图片/文件）物理删除。
+   - **1:N 群聊**：消息在 D1/R2 中保留给尚未阅读的其余群成员。当群内**所有非发送者成员均完成已读确认 (`all_read === true`)** 时，服务端自动执行物理删除；若有成员长期离线未读，则在达到 `expires_at`（默认 24h）后由定时清理任务彻底清空。
+
+### 10.2 TTL 自动过期与后台清理
 
 - 默认所有消息有效期为 24 小时（发送方可按需传入自定义 `expires_in_seconds`）。
 - 消息过期后，所有查询端点（`/sync`、`/messages`）均会自动过滤不予返回。
-- 服务端配置了 Cloudflare Cron Triggers 定时任务，会自动批量物理清除过期的数据与 R2 音频对象。
+- 服务端配置了 Cloudflare Cron Triggers 定时任务，会自动批量物理清除过期的数据与 R2 媒体对象（音频、图片、文件）。
 
 ---
 
-## 10. 模块八：增量全局同步引擎 (Incremental Sync)
+## 11. 模块九：增量全局同步引擎 (Incremental Sync)
 
 移动端与 Web 端建议在登录后维护一个轮询或切前台拉取的“增量同步通道”。
 
-### 10.1 增量同步端点
+### 11.1 增量同步端点
 
 - **接口路径**：`GET WORKER_BASE_URL/sync`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
@@ -760,7 +1005,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   }
   ```
 
-### 10.2 前端增量同步最佳实践架构
+### 11.2 前端增量同步最佳实践架构
 
 ```typescript
 let lastSyncTimestamp = Number(localStorage.getItem("chat_last_sync") || 0);
@@ -796,7 +1041,7 @@ setInterval(syncLoop, 3000);
 
 ---
 
-## 11. 前端 TypeScript 类型定义汇总
+## 12. 前端 TypeScript 类型定义汇总
 
 可以直接复制到前端项目的 `src/types/chat.ts` 中：
 
@@ -847,9 +1092,41 @@ export interface Conversation {
   members?: ConversationMember[];
 }
 
-export type MessageType = "text" | "voice";
+export type MessageType = "text" | "voice" | "image" | "file";
 export type RetentionType = "permanent" | "on_read";
 export type MessageStatus = "pending" | "delivered" | "read" | "burned";
+
+export interface VoiceMetadata {
+  id: string;
+  message_id: string;
+  object_key: string;
+  duration: number;
+  mime_type: string;
+  size: number;
+  created_at: number;
+}
+
+export interface ImageMetadata {
+  id: string;
+  message_id: string;
+  object_key: string;
+  file_name: string | null;
+  mime_type: string;
+  size: number;
+  width: number | null;
+  height: number | null;
+  created_at: number;
+}
+
+export interface FileMetadata {
+  id: string;
+  message_id: string;
+  object_key: string;
+  file_name: string;
+  mime_type: string;
+  size: number;
+  created_at: number;
+}
 
 export interface Message {
   id: string;
@@ -864,16 +1141,9 @@ export interface Message {
   delivered_at: number | null;
   read_at: number | null;
   created_at: number;
-}
-
-export interface VoiceMetadata {
-  id: string;
-  message_id: string;
-  object_key: string;
-  duration: number;
-  mime_type: string;
-  size: number;
-  created_at: number;
+  voice?: VoiceMetadata | null;
+  image?: ImageMetadata | null;
+  file?: FileMetadata | null;
 }
 
 export interface SyncResponse {
@@ -885,7 +1155,7 @@ export interface SyncResponse {
 
 ---
 
-## 12. 完整前端集成示例代码 (TypeScript SDK)
+## 13. 完整前端集成示例代码 (TypeScript SDK)
 
 基于原生 `fetch` 与 `viem`（或 `ethers.js`），支持即拷即用的轻量客户端封装：
 
@@ -896,6 +1166,8 @@ import type {
   Conversation,
   Message,
   VoiceMetadata,
+  ImageMetadata,
+  FileMetadata,
   SyncResponse
 } from "./types/chat";
 
@@ -1139,7 +1411,115 @@ export class Web3ChatClient {
     return URL.createObjectURL(blob);
   }
 
-  // ==================== 7. 全局增量同步 (Sync) ====================
+  /** 获取语音元数据 */
+  public async getVoiceMetadata(messageId: string): Promise<VoiceMetadata> {
+    return this.request<VoiceMetadata>(`/voice/${messageId}/meta`);
+  }
+
+  // ==================== 7. 图片消息模块 (R2) ====================
+
+  /** 上传图片（FormData 二进制） */
+  public async uploadImage(
+    conversationId: string,
+    imageBlob: Blob,
+    fileName = "image.png",
+    options?: {
+      caption?: string;
+      width?: number;
+      height?: number;
+      retention?: "permanent" | "on_read";
+      expiresInSeconds?: number;
+    }
+  ): Promise<{ message: Message; image: ImageMetadata }> {
+    const formData = new FormData();
+    formData.append("conversation_id", conversationId);
+    formData.append("file", imageBlob, fileName);
+    if (options?.caption) formData.append("caption", options.caption);
+    if (options?.width) formData.append("width", options.width.toString());
+    if (options?.height) formData.append("height", options.height.toString());
+    formData.append("retention", options?.retention || "permanent");
+    if (options?.expiresInSeconds) {
+      formData.append("expires_in_seconds", options.expiresInSeconds.toString());
+    }
+
+    return this.request<{ message: Message; image: ImageMetadata }>("/images/upload", {
+      method: "POST",
+      body: formData,
+    });
+  }
+
+  /** 获取图片 Blob URL */
+  public async getImageUrl(messageId: string): Promise<string> {
+    const res = await fetch(`${this.baseUrl}/images/${messageId}`, {
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(`Image download failed: ${res.statusText}`);
+    }
+
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  }
+
+  /** 获取图片元数据 */
+  public async getImageMetadata(messageId: string): Promise<ImageMetadata> {
+    return this.request<ImageMetadata>(`/images/${messageId}/meta`);
+  }
+
+  // ==================== 8. 文件消息模块 (R2) ====================
+
+  /** 上传文件（FormData 二进制） */
+  public async uploadFile(
+    conversationId: string,
+    fileBlob: Blob,
+    fileName: string,
+    options?: {
+      caption?: string;
+      retention?: "permanent" | "on_read";
+      expiresInSeconds?: number;
+    }
+  ): Promise<{ message: Message; file: FileMetadata }> {
+    const formData = new FormData();
+    formData.append("conversation_id", conversationId);
+    formData.append("file", fileBlob, fileName);
+    formData.append("file_name", fileName);
+    if (options?.caption) formData.append("caption", options.caption);
+    formData.append("retention", options?.retention || "permanent");
+    if (options?.expiresInSeconds) {
+      formData.append("expires_in_seconds", options.expiresInSeconds.toString());
+    }
+
+    return this.request<{ message: Message; file: FileMetadata }>("/files/upload", {
+      method: "POST",
+      body: formData,
+    });
+  }
+
+  /** 获取文件下载 Blob URL */
+  public async getFileUrl(messageId: string): Promise<string> {
+    const res = await fetch(`${this.baseUrl}/files/${messageId}`, {
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(`File download failed: ${res.statusText}`);
+    }
+
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  }
+
+  /** 获取文件元数据 */
+  public async getFileMetadata(messageId: string): Promise<FileMetadata> {
+    return this.request<FileMetadata>(`/files/${messageId}/meta`);
+  }
+
+  // ==================== 9. 全局增量同步 (Sync) ====================
 
   public async getSyncUpdates(sinceTimestamp = 0, limit = 100): Promise<SyncResponse> {
     const params = new URLSearchParams({

@@ -190,7 +190,13 @@ describe('End-to-End Integration Suite', () => {
     }, env);
     expect(charlieReadRes.status).toBe(200);
     const charlieReadData = (await charlieReadRes.json()) as any;
-    expect(charlieReadData.status).toBe('read'); // Not burned yet, waiting for Bob!
+    expect(charlieReadData.status).toBe('burned'); // Burned for Charlie!
+
+    // Charlie attempts to download again -> rejected with 404 (burned for Charlie)
+    const charlieRepeatDownload = await app.request(`/voice/${voiceMsgId}`, {
+      headers: { Authorization: `Bearer ${charlie.token}` },
+    }, env);
+    expect(charlieRepeatDownload.status).toBe(404);
 
     // Alice checks message receipts to see per-recipient delivery & read progress
     const receiptsRes = await app.request(`/messages/${voiceMsgId}/receipts`, {
@@ -206,7 +212,7 @@ describe('End-to-End Integration Suite', () => {
     expect(charlieRec.status).toBe('read');
     expect(bobRec.status).toBe('pending');
 
-    // File is still preserved in R2 for Bob
+    // File is still preserved in R2 for Bob (who has not read yet)
     expect(r2.hasKey(voiceKey)).toBe(true);
 
     // Bob downloads and reads the ephemeral voice message (2 of 2 recipients -> all read -> burn triggered!)
@@ -238,6 +244,72 @@ describe('End-to-End Integration Suite', () => {
       headers: { Authorization: `Bearer ${bob.token}` },
     }, env);
     expect(subsequentDownload.status).toBe(404);
+
+    // -------------------------------------------------------------------------
+    // 3.5 Image & File Messaging (Upload, Metadata, Streaming, Sync Enrichment)
+    // -------------------------------------------------------------------------
+    // Alice sends an image to the group
+    const imgBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const imgRes = await app.request('/images/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+      body: JSON.stringify({
+        conversation_id: group.id,
+        image_base64: Buffer.from(imgBytes).toString('base64'),
+        mime_type: 'image/png',
+        file_name: 'hero.png',
+        caption: 'Design Mockup',
+      }),
+    }, env);
+    expect(imgRes.status).toBe(201);
+    const imgData = (await imgRes.json()) as any;
+    const imgMsgId = imgData.message.id;
+
+    // Bob sends a file to the group
+    const fileBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+    const fileRes = await app.request('/files/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bob.token}` },
+      body: JSON.stringify({
+        conversation_id: group.id,
+        file_base64: Buffer.from(fileBytes).toString('base64'),
+        mime_type: 'application/pdf',
+        file_name: 'specs.pdf',
+        caption: 'Specification Doc',
+      }),
+    }, env);
+    expect(fileRes.status).toBe(201);
+    const fileData = (await fileRes.json()) as any;
+    const fileMsgId = fileData.message.id;
+
+    // Charlie pulls via incremental sync and receives both with enriched media metadata
+    const syncRes = await app.request(`/sync?since=0`, {
+      headers: { Authorization: `Bearer ${charlie.token}` },
+    }, env);
+    expect(syncRes.status).toBe(200);
+    const syncData = (await syncRes.json()) as any;
+    const syncedImg = syncData.messages.find((m: any) => m.id === imgMsgId);
+    const syncedFile = syncData.messages.find((m: any) => m.id === fileMsgId);
+    expect(syncedImg).toBeDefined();
+    expect(syncedImg.type).toBe('image');
+    expect(syncedImg.image).toBeDefined();
+    expect(syncedImg.image.file_name).toBe('hero.png');
+
+    expect(syncedFile).toBeDefined();
+    expect(syncedFile.type).toBe('file');
+    expect(syncedFile.file).toBeDefined();
+    expect(syncedFile.file.file_name).toBe('specs.pdf');
+
+    // Charlie downloads image and file
+    const downloadImgRes = await app.request(`/images/${imgMsgId}`, {
+      headers: { Authorization: `Bearer ${charlie.token}` },
+    }, env);
+    expect(downloadImgRes.status).toBe(200);
+
+    const downloadFileRes = await app.request(`/files/${fileMsgId}`, {
+      headers: { Authorization: `Bearer ${charlie.token}` },
+    }, env);
+    expect(downloadFileRes.status).toBe(200);
 
     // -------------------------------------------------------------------------
     // 4. Message Expiration & Scheduled Sweeper Cleanup

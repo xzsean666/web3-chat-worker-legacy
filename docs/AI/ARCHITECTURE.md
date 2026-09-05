@@ -17,12 +17,13 @@
                 +--------------------+--------------------+
                 |                                         |
                 v                                         v
-   +-------------------------+               +-------------------------+
-   |   Cloudflare D1 (DB)    |               |   Cloudflare R2 Bucket  |
-   | (Users, Sessions,       |               |      (Voice Files)      |
-   |  Conversations, Groups, |               +-------------------------+
-   |  Messages, Receipts)    |
-   +-------------------------+
+    +-------------------------+               +-------------------------+
+    |   Cloudflare D1 (DB)    |               |   Cloudflare R2 Bucket  |
+    | (Users, Sessions,       |               | (Voice, Images & Files) |
+    |  Conversations, Groups, |               +-------------------------+
+    |  Messages, Receipts,    |
+    |  Media Metadata)        |
+    +-------------------------+
 ```
 
 ## 2. Core Entities & D1 Schema
@@ -70,8 +71,8 @@
 - `id`: TEXT PRIMARY KEY
 - `conversation_id`: TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE
 - `sender_id`: TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
-- `type`: TEXT NOT NULL CHECK(type IN ('text', 'voice'))
-- `content`: TEXT (text body or audio metadata summary)
+- `type`: TEXT NOT NULL CHECK(type IN ('text', 'voice', 'image', 'file'))
+- `content`: TEXT (text body or media metadata summary / caption)
 - `retention`: TEXT NOT NULL DEFAULT 'permanent' CHECK(retention IN ('permanent', 'on_read'))
 - `status`: TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'delivered', 'read'))
 - `expires_at`: INTEGER NOT NULL (timestamp ms)
@@ -96,6 +97,26 @@
 - `size`: INTEGER NOT NULL
 - `created_at`: INTEGER NOT NULL
 
+### 2.9 `image_messages`
+- `id`: TEXT PRIMARY KEY
+- `message_id`: TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE
+- `object_key`: TEXT NOT NULL UNIQUE
+- `file_name`: TEXT
+- `mime_type`: TEXT NOT NULL
+- `size`: INTEGER NOT NULL
+- `width`: INTEGER
+- `height`: INTEGER
+- `created_at`: INTEGER NOT NULL
+
+### 2.10 `file_messages`
+- `id`: TEXT PRIMARY KEY
+- `message_id`: TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE
+- `object_key`: TEXT NOT NULL UNIQUE
+- `file_name`: TEXT NOT NULL
+- `mime_type`: TEXT NOT NULL
+- `size`: INTEGER NOT NULL
+- `created_at`: INTEGER NOT NULL
+
 ## 3. High Performance Incremental Sync Protocol
 To satisfy client performance and simple interaction:
 - **Cursor Sync API**:
@@ -115,11 +136,13 @@ To satisfy client performance and simple interaction:
 ## 4. Ephemeral Lifecycle & 1:N Group Delivery Rollup
 - **Per-Recipient Delivery Tracking**:
   Each recipient acknowledges delivery individually. In 1:1 chats, message status becomes `delivered` upon the recipient's ACK. In 1:N group chats, `messages.status` transitions to `delivered` only when **all** other members have acknowledged delivery.
-- **Read ACK & Burn-on-Read Synchronization**:
+- **Read ACK & Burn-on-Read Synchronization (Per-Recipient Burn + Full Dual Destruction)**:
   When a recipient reads an `on_read` message:
-  1. In 1:1 chat, reading the message immediately triggers atomic dual-storage destruction.
-  2. In 1:N group chat, destruction is delayed until **all** recipients have read the message, ensuring no member misses the message.
-  3. Upon the final recipient's read ACK:
+  1. The API always responds with `{ status: "burned" }`, allowing the reader's client to trigger burn animations and delete local state immediately.
+  2. For the reading user, subsequent `/conversations/:id/messages` and `/sync` calls automatically filter out the read `on_read` message, and voice playback requests (`GET /voice/:id`) return HTTP 404 to prevent re-listening.
+  3. In 1:1 chat, reading the message immediately triggers atomic dual-storage destruction in D1 & R2.
+  4. In 1:N group chat, the message row and R2 audio remain preserved in transit for unread members.
+  5. Upon the final recipient's read ACK (`all_read === true`), atomic dual-storage destruction executes:
      - If voice, delete R2 audio object from `voice_messages`.
      - Delete D1 record from `messages` (cascading to `voice_messages` and `message_receipts`).
 - **Expiration Purge**:

@@ -296,18 +296,32 @@ describe('Explicit Delivery ACK & Burn-on-Read Lifecycle', () => {
     }, env);
     const msg = (await sendRes.json()) as any;
 
-    // Bob reads first
+    // Bob reads first -> returns burned for Bob, but message preserved in DB until all read
     const bobReadRes = await app.request(`/messages/${msg.id}/read`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${bobToken}` },
     }, env);
     expect(bobReadRes.status).toBe(200);
     const bobReadData = (await bobReadRes.json()) as any;
-    expect(bobReadData.status).toBe('read'); // Not burned yet!
+    expect(bobReadData.status).toBe('burned'); // Burned for Bob!
 
     // Message must still exist in DB so Charlie can read it
     let inDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msg.id).first();
     expect(inDb).not.toBeNull();
+
+    // Bob cannot fetch the read on_read message anymore (filtered out)
+    const bobMessagesRes = await app.request(`/conversations/${group.id}/messages`, {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    const bobMessagesData = (await bobMessagesRes.json()) as any;
+    expect(bobMessagesData.messages.some((m: any) => m.id === msg.id)).toBe(false);
+
+    // Charlie has not read yet, so Charlie CAN still fetch it
+    const charlieMessagesRes = await app.request(`/conversations/${group.id}/messages`, {
+      headers: { Authorization: `Bearer ${charlieAuth.token}` },
+    }, env);
+    const charlieMessagesData = (await charlieMessagesRes.json()) as any;
+    expect(charlieMessagesData.messages.some((m: any) => m.id === msg.id)).toBe(true);
 
     // Check receipts: Bob read, Charlie pending
     const receiptsRes = await app.request(`/messages/${msg.id}/receipts`, {
@@ -354,5 +368,56 @@ describe('Explicit Delivery ACK & Burn-on-Read Lifecycle', () => {
       headers: { Authorization: `Bearer ${charlieAuth.token}` },
     }, env);
     expect(receiptsRes.status).toBe(403);
+  });
+
+  it('filters read on_read messages in incremental sync endpoint /sync for reading user', async () => {
+    const charlieWallet = createTestWallet();
+    const charlieAuth = await loginUser(charlieWallet);
+
+    // Alice creates group with Bob and Charlie
+    const groupRes = await app.request('/groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aliceToken}` },
+      body: JSON.stringify({
+        name: 'Sync Ephemeral Group',
+        member_ids: [bobUser.id, charlieAuth.user.id],
+      }),
+    }, env);
+    const group = (await groupRes.json()) as any;
+
+    const sendRes = await app.request(`/conversations/${group.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aliceToken}` },
+      body: JSON.stringify({ content: 'Sync secret', retention: 'on_read' }),
+    }, env);
+    const msg = (await sendRes.json()) as any;
+
+    // Bob syncs before reading -> sees the message
+    let bobSync = await app.request('/sync', {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    let bobSyncData = (await bobSync.json()) as any;
+    expect(bobSyncData.messages.some((m: any) => m.id === msg.id)).toBe(true);
+
+    // Bob reads the message -> status: burned
+    const bobRead = await app.request(`/messages/${msg.id}/read`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    expect((await bobRead.json() as any).status).toBe('burned');
+
+    // Bob syncs after reading -> message is filtered out!
+    bobSync = await app.request('/sync', {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    bobSyncData = (await bobSync.json()) as any;
+    expect(bobSyncData.messages.some((m: any) => m.id === msg.id)).toBe(false);
+
+    // Charlie has not read -> Charlie still sees the message in sync
+    const charlieSync = await app.request('/sync', {
+      headers: { Authorization: `Bearer ${charlieAuth.token}` },
+    }, env);
+    const charlieSyncData = (await charlieSync.json()) as any;
+    expect(charlieSyncData.messages.some((m: any) => m.id === msg.id)).toBe(true);
   });
 });

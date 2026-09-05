@@ -45,7 +45,7 @@ export interface MessageRow {
   id: string;
   conversation_id: string;
   sender_id: string;
-  type: 'text' | 'voice';
+  type: 'text' | 'voice' | 'image' | 'file';
   content: string | null;
   retention: 'permanent' | 'on_read';
   status: 'pending' | 'delivered' | 'read';
@@ -68,6 +68,28 @@ export interface VoiceMessageRow {
   message_id: string;
   object_key: string;
   duration: number;
+  mime_type: string;
+  size: number;
+  created_at: number;
+}
+
+export interface ImageMessageRow {
+  id: string;
+  message_id: string;
+  object_key: string;
+  file_name: string | null;
+  mime_type: string;
+  size: number;
+  width: number | null;
+  height: number | null;
+  created_at: number;
+}
+
+export interface FileMessageRow {
+  id: string;
+  message_id: string;
+  object_key: string;
+  file_name: string;
   mime_type: string;
   size: number;
   created_at: number;

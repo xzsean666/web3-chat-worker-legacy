@@ -127,9 +127,24 @@ export async function getVoiceAudio(
   userId: string,
   messageId: string
 ): Promise<{ object: R2ObjectBody; metadata: VoiceMessageRow }> {
+  const metadata = await getVoiceMetadata(db, userId, messageId);
+
+  const object = await r2.get(metadata.object_key);
+  if (!object) {
+    throw new Error('Audio file not found in storage');
+  }
+
+  return { object, metadata };
+}
+
+export async function getVoiceMetadata(
+  db: D1Database,
+  userId: string,
+  messageId: string
+): Promise<VoiceMessageRow> {
   const msg = await db.prepare(
-    'SELECT id, conversation_id, expires_at FROM messages WHERE id = ?'
-  ).bind(messageId).first<{ id: string; conversation_id: string; expires_at: number }>();
+    'SELECT id, conversation_id, expires_at, retention FROM messages WHERE id = ?'
+  ).bind(messageId).first<{ id: string; conversation_id: string; expires_at: number; retention: string }>();
 
   if (!msg) {
     throw new Error('Message not found');
@@ -147,6 +162,16 @@ export async function getVoiceAudio(
     throw new Error('Message has expired');
   }
 
+  if (msg.retention === 'on_read') {
+    const alreadyRead = await db.prepare(
+      "SELECT 1 FROM message_receipts WHERE message_id = ? AND user_id = ? AND status = 'read'"
+    ).bind(messageId, userId).first();
+
+    if (alreadyRead) {
+      throw new Error('Message not found or already burned');
+    }
+  }
+
   const voice = await db.prepare(
     'SELECT * FROM voice_messages WHERE message_id = ?'
   ).bind(messageId).first<VoiceMessageRow>();
@@ -155,10 +180,5 @@ export async function getVoiceAudio(
     throw new Error('Voice metadata not found');
   }
 
-  const object = await r2.get(voice.object_key);
-  if (!object) {
-    throw new Error('Audio file not found in storage');
-  }
-
-  return { object, metadata: voice };
+  return voice;
 }

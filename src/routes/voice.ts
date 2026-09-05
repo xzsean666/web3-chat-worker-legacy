@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { authMiddleware } from '../middleware/auth';
-import { uploadVoiceMessage, getVoiceAudio } from '../services/voice';
+import { uploadVoiceMessage, getVoiceAudio, getVoiceMetadata } from '../services/voice';
 
 const voiceRoutes = new Hono<AppEnv>();
 
@@ -74,6 +74,19 @@ voiceRoutes.post('/upload', async (c) => {
     return c.json(result, 201);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : 400;
+    return c.json({ error: err.message }, status);
+  }
+});
+
+voiceRoutes.get('/:messageId/meta', async (c) => {
+  try {
+    const user = c.get('user');
+    const messageId = c.req.param('messageId');
+
+    const metadata = await getVoiceMetadata(c.env.DB, user.id, messageId);
+    return c.json(metadata);
+  } catch (err: any) {
+    const status = err.message.includes('Unauthorized') ? 403 : 404;
     return c.json({ error: err.message }, status);
   }
 });

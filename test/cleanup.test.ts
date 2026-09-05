@@ -125,4 +125,74 @@ describe('Scheduled Expiration Cleanup & Cron Worker', () => {
     // Verify cleanup completed
     expect(r2.hasKey('voice/exp.webm')).toBe(false);
   });
+
+  it('purges expired image and file messages and deletes their R2 objects', async () => {
+    const now = Date.now();
+
+    // Insert expired image message + R2 image
+    await db.prepare(`
+      INSERT INTO messages (id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at)
+      VALUES (?, ?, ?, 'image', '[Image]', 'permanent', 'pending', ?, ?)
+    `).bind('msg_exp_img', 'c1', 'u1', now - 5000, now - 15000).run();
+
+    await db.prepare(`
+      INSERT INTO image_messages (id, message_id, object_key, file_name, mime_type, size, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).bind('im_exp', 'msg_exp_img', 'images/exp.png', 'exp.png', 'image/png', 200, now - 15000).run();
+    await r2.put('images/exp.png', new Uint8Array(200));
+
+    // Insert active image message + R2 image
+    await db.prepare(`
+      INSERT INTO messages (id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at)
+      VALUES (?, ?, ?, 'image', '[Image]', 'permanent', 'pending', ?, ?)
+    `).bind('msg_act_img', 'c1', 'u1', now + 60000, now).run();
+
+    await db.prepare(`
+      INSERT INTO image_messages (id, message_id, object_key, file_name, mime_type, size, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).bind('im_act', 'msg_act_img', 'images/act.png', 'act.png', 'image/png', 300, now).run();
+    await r2.put('images/act.png', new Uint8Array(300));
+
+    // Insert expired file message + R2 file
+    await db.prepare(`
+      INSERT INTO messages (id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at)
+      VALUES (?, ?, ?, 'file', '[File: old.pdf]', 'permanent', 'pending', ?, ?)
+    `).bind('msg_exp_file', 'c1', 'u1', now - 5000, now - 15000).run();
+
+    await db.prepare(`
+      INSERT INTO file_messages (id, message_id, object_key, file_name, mime_type, size, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).bind('fm_exp', 'msg_exp_file', 'files/msg_exp_file/old.pdf', 'old.pdf', 'application/pdf', 500, now - 15000).run();
+    await r2.put('files/msg_exp_file/old.pdf', new Uint8Array(500));
+
+    // Insert active file message + R2 file
+    await db.prepare(`
+      INSERT INTO messages (id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at)
+      VALUES (?, ?, ?, 'file', '[File: new.pdf]', 'permanent', 'pending', ?, ?)
+    `).bind('msg_act_file', 'c1', 'u1', now + 60000, now).run();
+
+    await db.prepare(`
+      INSERT INTO file_messages (id, message_id, object_key, file_name, mime_type, size, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).bind('fm_act', 'msg_act_file', 'files/msg_act_file/new.pdf', 'new.pdf', 'application/pdf', 600, now).run();
+    await r2.put('files/msg_act_file/new.pdf', new Uint8Array(600));
+
+    // Initial state
+    expect(r2.hasKey('images/exp.png')).toBe(true);
+    expect(r2.hasKey('images/act.png')).toBe(true);
+    expect(r2.hasKey('files/msg_exp_file/old.pdf')).toBe(true);
+    expect(r2.hasKey('files/msg_act_file/new.pdf')).toBe(true);
+
+    const result = await sweepExpiredMessages(db, r2 as unknown as R2Bucket);
+
+    expect(result.deleted_image_objects).toBe(1);
+    expect(result.deleted_file_objects).toBe(1);
+    expect(result.deleted_media_objects).toBeGreaterThanOrEqual(3); // voice + image + file
+
+    // Expired deleted, active retained
+    expect(r2.hasKey('images/exp.png')).toBe(false);
+    expect(r2.hasKey('images/act.png')).toBe(true);
+    expect(r2.hasKey('files/msg_exp_file/old.pdf')).toBe(false);
+    expect(r2.hasKey('files/msg_act_file/new.pdf')).toBe(true);
+  });
 });

@@ -21,12 +21,13 @@ High-performance, single-node Cloudflare Worker backend for ephemeral Web3 chat.
                 +--------------------+--------------------+
                 |                                         |
                 v                                         v
-   +-------------------------+               +-------------------------+
-   |   Cloudflare D1 (DB)    |               |   Cloudflare R2 Bucket  |
-   | (Users, Sessions,       |               |      (Voice Files)      |
-   |  Conversations, Groups, |               +-------------------------+
-   |  Messages, Receipts)    |
-   +-------------------------+
+    +-------------------------+               +-------------------------+
+    |   Cloudflare D1 (DB)    |               |   Cloudflare R2 Bucket  |
+    | (Users, Sessions,       |               | (Voice, Images & Files) |
+    |  Conversations, Groups, |               +-------------------------+
+    |  Messages, Receipts,    |
+    |  Media Metadata)        |
+    +-------------------------+
 ```
 
 1. **Cloudflare Worker Single-Node Architecture**: Zero multi-worker coordination complexity, ultra-low latency edge V8 execution.
@@ -336,8 +337,10 @@ Read acknowledgement when the user views the message.
 - **Effect**:
   - For `permanent` messages: Transitions status to `read` (when all recipients have read in groups).
   - For `on_read` messages:
-    - In **1:1 chats**: Atomically destroys the message row in D1 and R2 audio binary immediately.
-    - In **1:N group chats**: Delays destruction until **all** recipients have read the message (ensuring no member misses it), or until `expires_at` cron sweeper purges it.
+    - Always responds with `{ "status": "burned" }` so client can trigger immediate burn UI and purge local message state.
+    - Filters out the message in `/conversations/:id/messages` and `/sync` for reading members, and rejects repeat audio downloads (`GET /voice/:id` -> 404).
+    - In **1:1 chats**: Atomically destroys D1 row and R2 audio binary immediately.
+    - In **1:N group chats**: Preserves transit message until **all** group recipients have read (`all_read === true`), then executes atomic dual-storage destruction (or until `expires_at` cron sweeper).
 
 #### `GET /messages/:id/receipts`
 Inspect delivery and read progress for each recipient in direct or group chats.
@@ -400,9 +403,50 @@ Upload an audio binary. Supports both `multipart/form-data` and JSON (Base64).
 #### `GET /voice/:messageId`
 Stream and download audio binary directly from R2. Returns `200 OK` with `Content-Type` matching audio format. Returns `403` if requester is not a member, or `404` if destroyed/expired.
 
+#### `GET /voice/:messageId/meta`
+Retrieve voice metadata JSON without downloading the audio body.
+
 ---
 
-### 6. Scheduled Sweeper & Admin Maintenance
+### 6. Image & File Messages (`/images`, `/files`)
+
+#### `POST /images/upload`
+Upload an image binary (JPEG, PNG, WebP, GIF, SVG, BMP, HEIC, AVIF; up to 20MB). Supports `multipart/form-data` and JSON (Base64).
+- **Multipart Fields**:
+  - `file`: Binary image file.
+  - `conversation_id`: Target conversation ID.
+  - `caption`: Optional text caption.
+  - `width` / `height`: Optional image dimensions.
+  - `retention`: `"permanent"` or `"on_read"`.
+  - `expires_in_seconds`: Expiration in seconds.
+- **Response**: `201 Created` with `{ message, image }`.
+
+#### `GET /images/:messageId`
+Stream image binary directly from R2 with `Content-Disposition: inline`.
+
+#### `GET /images/:messageId/meta`
+Retrieve image metadata JSON.
+
+#### `POST /files/upload`
+Upload a generic file/document (up to 50MB). Supports `multipart/form-data` and JSON (Base64).
+- **Multipart Fields**:
+  - `file`: Binary file.
+  - `conversation_id`: Target conversation ID.
+  - `file_name`: Optional explicit filename.
+  - `caption`: Optional text caption.
+  - `retention`: `"permanent"` or `"on_read"`.
+  - `expires_in_seconds`: Expiration in seconds.
+- **Response**: `201 Created` with `{ message, file }`.
+
+#### `GET /files/:messageId`
+Stream file binary directly from R2 with `Content-Disposition: attachment; filename=...`.
+
+#### `GET /files/:messageId/meta`
+Retrieve file metadata JSON.
+
+---
+
+### 7. Scheduled Sweeper & Admin Maintenance
 
 #### `POST /admin/cleanup`
 Manually invoke expiration sweeper.

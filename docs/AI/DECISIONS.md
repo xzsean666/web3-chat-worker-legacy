@@ -51,3 +51,25 @@
   4. **Immutable Ownership & Single Authority**: A group permanently belongs to its creator. Ownership cannot be transferred. Only the owner can rename the group or add/remove members. If the owner leaves, the group is dismissed.
   5. **Conflict-Free State Merging**: Conversations support Last-Write-Wins (LWW) merging on `updated_at`, and members support idempotent `INSERT OR IGNORE` merging without duplicate rows.
 - **Consequences**: Workers become stateless, plug-and-play transit nodes. Groups and users can be merged across multiple Cloudflare Worker D1 instances without coordination or lock contention.
+
+## ADR-008: Per-Recipient Burn-on-Read & Read-State Message Filtering
+- **Status**: Accepted
+- **Context**: Under ADR-006, delaying physical destruction until all group members read caused ephemeral messages to remain visible and re-fetchable by users who had already read them. Additionally, read acknowledgments returned `status: 'read'` instead of `burned` for partial reads, breaking client-side burn animations and local message deletion.
+- **Decision**:
+  1. **Unified Burn Status**: `POST /messages/:id/read` and `/messages/read` always return `status: 'burned'` for `retention: 'on_read'` messages upon successful read receipt creation, across both direct and group conversations.
+  2. **Query Read-State Filtering**: In `/conversations/:id/messages` and `/sync`, filter out `on_read` messages where the requesting user already has a `status = 'read'` receipt in `message_receipts`.
+  3. **Voice Replay Prevention**: Guard `GET /voice/:messageId` to return HTTP 404 if the requester has already submitted a read receipt for an `on_read` voice message.
+  4. **Preserve Deferred Full Destruction**: Maintain dual-storage physical destruction (D1 delete + R2 delete) when ALL non-sender recipients have read (`all_read === true`) or when `expires_at` is reached.
+- **Consequences**: Readers experience immediate burn-on-read locally and on message refreshes, unread group members retain access until they read, and server resources are cleanly purged once all recipients have consumed the message.
+
+## ADR-009: Dual-Storage Architecture & Synchronized Lifecycle for Image and File Messaging
+- **Status**: Accepted
+- **Context**: Users and clients require the ability to send images (JPEG, PNG, WebP, GIF, SVG, BMP, HEIC, AVIF) and generic files/attachments (PDF, ZIP, DOC, etc.) with the same security, authorization, ephemeral retention (burn-on-read), TTL expiration, and incremental sync capabilities as text and voice messages.
+- **Decision**:
+  1. **Expanded Message Types**: Expand `messages.type` CHECK constraint to `CHECK(type IN ('text', 'voice', 'image', 'file'))`.
+  2. **Dedicated Metadata Tables**: Create `image_messages` (with `width`, `height`, `file_name`, `mime_type`, `size`) and `file_messages` (with `file_name`, `mime_type`, `size`), both with foreign keys `REFERENCES messages(id) ON DELETE CASCADE`.
+  3. **Dual-Storage Destruction**: Extend `destroyMessage` to inspect `voice_messages`, `image_messages`, and `file_messages` and purge the binary object from R2 before deleting the D1 message row.
+  4. **Expiration Sweeper Integration**: Extend `sweepExpiredMessages` to batch-delete expired voice, image, and file objects from R2 alongside D1 rows.
+  5. **Streaming & Content Disposition**: `GET /images/:messageId` serves inline binary streaming; `GET /files/:messageId` serves attachment binary streaming with RFC 5987 / RFC 6266 unicode filename handling. Dedicated `/meta` endpoints provide JSON metadata inspection.
+  6. **Sync Enrichment**: Automatically enrich messages returned by `/conversations/:id/messages` and `/sync` with media metadata (`voice`, `image`, `file`) to eliminate extra client round-trips.
+- **Consequences**: High-performance, secure image and file sharing is fully unified with Web3 authentication, explicit ACKs, burn-on-read, and incremental sync.

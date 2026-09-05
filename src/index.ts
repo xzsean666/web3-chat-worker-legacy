@@ -7,6 +7,8 @@ import { groupRoutes } from './routes/groups';
 import { messageRoutes } from './routes/messages';
 import { syncRoutes } from './routes/sync';
 import { voiceRoutes } from './routes/voice';
+import { imageRoutes } from './routes/images';
+import { fileRoutes } from './routes/files';
 import { sweepExpiredMessages } from './services/cleanup';
 
 const app = new Hono<AppEnv>();
@@ -34,6 +36,8 @@ app.route('/auth', authRoutes);
 app.route('/conversations', conversationRoutes);
 app.route('/groups', groupRoutes);
 app.route('/voice', voiceRoutes);
+app.route('/images', imageRoutes);
+app.route('/files', fileRoutes);
 app.route('/', messageRoutes);
 app.route('/sync', syncRoutes);
 

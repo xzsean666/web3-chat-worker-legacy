@@ -13,3 +13,6 @@
 | [TASK-009](tasks/TASK-009.md) | End-to-End Integration Verification & API Docs | TASK-008 | DONE | Full lifecycle E2E test suite, API documentation, and deployment guidelines |
 | [TASK-010](tasks/TASK-010.md) | Group Chat 1:N Delivery Rollup, Burn-on-Read Synchronization & Message Receipts API | TASK-009 | DONE | Group delivery rollup, group burn-on-read synchronization, and receipts query API |
 | [TASK-011](tasks/TASK-011.md) | Sovereign Groups, Address-as-User-ID & Conflict-Free State Merging | TASK-010 | DONE | Address-as-User-ID, deterministic direct IDs, sovereign group IDs, and multi-node merge SOP |
+| [TASK-012](tasks/TASK-012.md) | Per-Recipient Burn-on-Read & Group Read-State Filtering | TASK-011 | DONE | Per-user burn response, per-user query filtering, voice download guard, and deferred full destruction |
+| [TASK-013](tasks/TASK-013.md) | Image & File Messaging Support with Dual-Storage R2 Upload, Download & Destruction | TASK-012 | DONE | Image & file upload, download, metadata, dual-storage destruction, sweeper cleanup |
+

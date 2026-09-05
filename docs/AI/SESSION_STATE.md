@@ -4,7 +4,7 @@
 Build a high-performance, single-node Cloudflare Worker Web3 Chat MVP supporting EVM wallet signature login, direct/group chat, text and voice messaging, explicit delivery ACK, burn-on-read, voice destruction (R2), and incremental sync.
 
 ## Current Task
-TASK-011: Sovereign Groups, Address-as-User-ID & Conflict-Free State Merging
+TASK-013: Image & File Messaging Support with Dual-Storage R2 Upload, Download & Destruction
 
 ## Current Status
 DONE
@@ -15,7 +15,7 @@ DONE
 - Documented project goal in `docs/AI/GOAL.md`.
 - Defined architecture, D1 schema, and incremental sync protocols in `docs/AI/ARCHITECTURE.md`.
 - Recorded architectural decisions in `docs/AI/DECISIONS.md`.
-- Outlined task breakdown in `docs/AI/TASK_INDEX.md` and detailed specs in `docs/AI/tasks/TASK-001.md` through `TASK-011.md`.
+- Outlined task breakdown in `docs/AI/TASK_INDEX.md` and detailed specs in `docs/AI/tasks/TASK-001.md` through `TASK-013.md`.
 - Initialized `package.json`, configured `pnpm`, installed `hono`, `viem`, `wrangler`, `vitest`, and `@cloudflare/workers-types`.
 - Configured `tsconfig.json` for Cloudflare Worker runtime.
 - Configured `wrangler.jsonc` with D1 `DB` binding, R2 `VOICE_BUCKET` binding, and scheduled cron triggers.
@@ -66,74 +66,68 @@ DONE
 - TASK-011: Applied remote migration `0002_sovereign_groups.sql` to Cloudflare D1.
 - TASK-011: Deployed to Cloudflare Worker and verified with `pnpm run test:live` (10/10 live steps passed).
 - TASK-011: Completely purged remote D1 tables (`users`, `conversations`, `messages`, `sessions`, etc.) to clear legacy UUID schema data and eliminate foreign key conflicts for clean frontend onboarding.
+- TASK-012: Refactored `acknowledgeRead` to always return `{ status: 'burned' }` for `on_read` messages across 1:1 and group chats, resolving front-end UI state desync.
+- TASK-012: Added per-user `on_read` message filtering in `getConversationMessages` and `getSyncUpdates`, ensuring users who read ephemeral messages never see them upon refresh or delta sync.
+- TASK-012: Added replay prevention in `getVoiceAudio` (`src/services/voice.ts`), returning HTTP 404 if the requester already submitted a read receipt for an `on_read` voice message.
+- TASK-012: Preserved atomic dual-storage physical destruction (D1 + R2) once all recipients have read (`all_read === true`) or when `expires_at` is reached.
+- TASK-012: Updated `test/receipts.test.ts`, `test/e2e.test.ts`, and `scripts/live-e2e.ts` with per-recipient burn assertions, download guards, and sync exclusion tests.
+- TASK-012: Updated `docs/FRONTEND_INTEGRATION.md`, `docs/AI/ARCHITECTURE.md`, `docs/AI/DECISIONS.md` (ADR-008), and `README.md`.
+- TASK-013: Created `migrations/0003_media_messages.sql` adding `image_messages` and `file_messages` tables and expanding `messages.type` CHECK constraint to `CHECK(type IN ('text', 'voice', 'image', 'file'))`.
+- TASK-013: Updated `src/db/schema.ts` and `src/types.ts` with `ImageMessageRow`, `FileMessageRow`, and updated `MessageType`.
+- TASK-013: Implemented `src/services/images.ts` supporting image uploads (`multipart/form-data` and JSON Base64), MIME validation (JPEG, PNG, WebP, GIF, SVG, BMP, HEIC, AVIF), 20MB size guard, metadata queries, and streaming.
+- TASK-013: Implemented `src/services/files.ts` supporting file uploads (`multipart/form-data` and JSON Base64), filename sanitization, 50MB size guard, metadata queries, and attachment streaming.
+- TASK-013: Added `getVoiceMetadata` in `src/services/voice.ts` and `/voice/:messageId/meta` route for metadata inspection.
+- TASK-013: Implemented `src/routes/images.ts` (`POST /images/upload`, `GET /images/:messageId`, `GET /images/:messageId/meta`) and `src/routes/files.ts` (`POST /files/upload`, `GET /files/:messageId`, `GET /files/:messageId/meta`) and mounted in `src/index.ts`.
+- TASK-013: Extended `src/services/destruction.ts` (`destroyMessage`) and `src/services/cleanup.ts` (`sweepExpiredMessages`) for atomic R2 dual-storage deletion of voice, image, and file binaries.
+- TASK-013: Added `enrichMessagesWithMedia` in `src/services/messages.ts`, automatically attaching media metadata to messages in cursor pagination and incremental `/sync`.
+- TASK-013: Created `test/images.test.ts` (6 tests) and `test/files.test.ts` (6 tests), updated `test/db.test.ts`, `test/cleanup.test.ts`, and `test/e2e.test.ts`.
+- TASK-013: Documented ADR-009 in `docs/AI/DECISIONS.md`, updated `docs/AI/ARCHITECTURE.md`, `README.md`, and `docs/FRONTEND_INTEGRATION.md` with full TypeScript SDK methods.
 
 ## Modified Files
-- `package.json`
-- `pnpm-lock.yaml`
-- `tsconfig.json`
-- `wrangler.jsonc`
-- `vitest.config.ts`
-- `src/types.ts`
-- `src/index.ts`
+- `migrations/0001_initial_schema.sql`
+- `migrations/0003_media_messages.sql`
 - `src/db/schema.ts`
-- `src/db/index.ts`
-- `src/services/auth.ts`
-- `src/services/conversations.ts`
-- `src/services/messages.ts`
+- `src/types.ts`
+- `src/services/images.ts`
+- `src/services/files.ts`
 - `src/services/voice.ts`
 - `src/services/destruction.ts`
 - `src/services/cleanup.ts`
-- `src/middleware/auth.ts`
-- `src/routes/auth.ts`
-- `src/routes/conversations.ts`
-- `src/routes/groups.ts`
-- `src/routes/messages.ts`
-- `src/routes/sync.ts`
+- `src/services/messages.ts`
+- `src/routes/images.ts`
+- `src/routes/files.ts`
 - `src/routes/voice.ts`
-- `migrations/0001_initial_schema.sql`
-- `migrations/0002_sovereign_groups.sql`
-- `test/helpers/db.ts`
-- `test/helpers/wallet.ts`
-- `test/helpers/r2.ts`
-- `test/health.test.ts`
+- `src/index.ts`
+- `test/images.test.ts`
+- `test/files.test.ts`
 - `test/db.test.ts`
-- `test/auth.test.ts`
-- `test/conversations.test.ts`
-- `test/messages.test.ts`
-- `test/receipts.test.ts`
-- `test/voice.test.ts`
 - `test/cleanup.test.ts`
 - `test/e2e.test.ts`
-- `README.md`
-- `scripts/live-e2e.ts`
-- `docs/CLOUDFLARE_DATA_MERGE.md`
 - `docs/FRONTEND_INTEGRATION.md`
-- `docs/AI/TASK_INDEX.md`
-- `docs/AI/DECISIONS.md`
 - `docs/AI/ARCHITECTURE.md`
-- `docs/AI/tasks/TASK-001.md` through `TASK-011.md`
+- `docs/AI/DECISIONS.md`
+- `README.md`
+- `docs/AI/tasks/TASK-013.md`
+- `docs/AI/TASK_INDEX.md`
 - `docs/AI/SESSION_STATE.md`
 
 ## Verification Commands & Results
 - `pnpm run typecheck`: Success (zero type errors across all source and test files).
-- `pnpm test`: Success (43/43 tests passing across 9 test suites with 100% pass rate).
-- `pnpm wrangler d1 migrations apply web3_chat_db --remote`: Success (applied `0001_initial_schema.sql` and `0002_sovereign_groups.sql`).
-- `pnpm run deploy`: Success (deployed version `cc1970b8-61b9-4a9d-a990-333066e4f4da` to Cloudflare Worker).
-- `pnpm run test:live`: Success (10/10 live E2E steps passed against deployed Worker).
+- `pnpm test`: Success (58/58 tests passing across 11 test suites with 100% pass rate).
 
 ## Unresolved Issues
 None.
 
 ## Risks and Assumptions
-- Frontend clients should format group IDs as `${owner_address}:${slug}`.
+- R2 uploads share the bucket binding (`VOICE_BUCKET`) under prefixes `images/` and `files/`, ensuring zero-config backward compatibility with Cloudflare deployment bindings.
 
 ## Next Task
 Frontend integration & client SDK release.
 
 ## Next Session Read Files
 - `README.md`
-- `docs/CLOUDFLARE_DATA_MERGE.md`
 - `docs/FRONTEND_INTEGRATION.md`
-- `docs/AI/GOAL.md`
+- `docs/AI/ARCHITECTURE.md`
+- `docs/AI/DECISIONS.md`
 - `docs/AI/SESSION_STATE.md`
 

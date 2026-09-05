@@ -308,10 +308,19 @@ async function main() {
     method: 'POST',
     headers: { Authorization: `Bearer ${charlie.token}` },
   });
-  if (charlieReadRes.status !== 200 || charlieReadRes.data?.status !== 'read') {
-    throw new Error(`Expected status 'read' for Charlie partial read, got: ${JSON.stringify(charlieReadRes.data)}`);
+  if (charlieReadRes.status !== 200 || charlieReadRes.data?.status !== 'burned') {
+    throw new Error(`Expected status 'burned' for Charlie read, got: ${JSON.stringify(charlieReadRes.data)}`);
   }
-  logSuccess(`Charlie read voice message (status: read, waiting for Bob before burning)`);
+  logSuccess(`Charlie read voice message (status: burned, audio preserved in R2 for Bob)`);
+
+  // Charlie attempts repeat download -> should be rejected with 404
+  const charlieRepeatDownload = await request(`/voice/${voiceMsgId}`, {
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  if (charlieRepeatDownload.status !== 404) {
+    throw new Error(`Expected HTTP 404 for Charlie repeat download, got: ${charlieRepeatDownload.status}`);
+  }
+  logSuccess(`Verified Charlie cannot re-download audio after reading (HTTP 404)`);
 
   // Alice checks message receipts
   const receiptsRes = await request(`/messages/${voiceMsgId}/receipts`, {

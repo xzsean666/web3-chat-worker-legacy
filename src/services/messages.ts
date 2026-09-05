@@ -1,13 +1,16 @@
-import type { MessageRow } from '../db/schema';
+import type { MessageRow, VoiceMessageRow, ImageMessageRow, FileMessageRow } from '../db/schema';
 import { destroyMessage } from './destruction';
 
 export interface MessageWithSender extends MessageRow {
   sender_address: string;
+  voice?: VoiceMessageRow | null;
+  image?: ImageMessageRow | null;
+  file?: FileMessageRow | null;
 }
 
 export interface SendMessageOptions {
   content?: string;
-  type?: 'text' | 'voice';
+  type?: 'text' | 'voice' | 'image' | 'file';
   retention?: 'permanent' | 'on_read';
   expires_in_seconds?: number;
 }
@@ -127,42 +130,66 @@ export async function getConversationMessages(
         JOIN users u ON u.id = m.sender_id
         WHERE m.conversation_id = ?
           AND m.expires_at > ?
+          AND NOT (
+            m.retention = 'on_read'
+            AND EXISTS (
+              SELECT 1 FROM message_receipts mr
+              WHERE mr.message_id = m.id AND mr.user_id = ? AND mr.status = 'read'
+            )
+          )
           AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?))
         ORDER BY m.created_at ASC, m.id ASC
         LIMIT ?
       `;
-      params = [conversationId, now, cursorMsg.created_at, cursorMsg.created_at, options.after_id, limit + 1];
+      params = [conversationId, now, userId, cursorMsg.created_at, cursorMsg.created_at, options.after_id, limit + 1];
     } else {
       query = `
         SELECT m.*, u.wallet_address AS sender_address
         FROM messages m
         JOIN users u ON u.id = m.sender_id
-        WHERE m.conversation_id = ? AND m.expires_at > ?
+        WHERE m.conversation_id = ?
+          AND m.expires_at > ?
+          AND NOT (
+            m.retention = 'on_read'
+            AND EXISTS (
+              SELECT 1 FROM message_receipts mr
+              WHERE mr.message_id = m.id AND mr.user_id = ? AND mr.status = 'read'
+            )
+          )
         ORDER BY m.created_at ASC, m.id ASC
         LIMIT ?
       `;
-      params = [conversationId, now, limit + 1];
+      params = [conversationId, now, userId, limit + 1];
     }
   } else {
     query = `
       SELECT m.*, u.wallet_address AS sender_address
       FROM messages m
       JOIN users u ON u.id = m.sender_id
-      WHERE m.conversation_id = ? AND m.expires_at > ?
+      WHERE m.conversation_id = ?
+        AND m.expires_at > ?
+        AND NOT (
+          m.retention = 'on_read'
+          AND EXISTS (
+            SELECT 1 FROM message_receipts mr
+            WHERE mr.message_id = m.id AND mr.user_id = ? AND mr.status = 'read'
+          )
+        )
       ORDER BY m.created_at ASC, m.id ASC
       LIMIT ?
     `;
-    params = [conversationId, now, limit + 1];
+    params = [conversationId, now, userId, limit + 1];
   }
 
   const res = await db.prepare(query).bind(...params).all<MessageWithSender>();
   const rows = res.results;
   const has_more = rows.length > limit;
   const messages = has_more ? rows.slice(0, limit) : rows;
-  const next_cursor = messages.length > 0 ? messages[messages.length - 1].id : null;
+  const enriched = await enrichMessagesWithMedia(db, messages);
+  const next_cursor = enriched.length > 0 ? enriched[enriched.length - 1].id : null;
 
   return {
-    messages,
+    messages: enriched,
     next_cursor,
     has_more,
   };
@@ -184,20 +211,89 @@ export async function getSyncUpdates(
     JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
     WHERE m.expires_at > ?
       AND m.created_at > ?
+      AND NOT (
+        m.retention = 'on_read'
+        AND EXISTS (
+          SELECT 1 FROM message_receipts mr
+          WHERE mr.message_id = m.id AND mr.user_id = ? AND mr.status = 'read'
+        )
+      )
     ORDER BY m.created_at ASC, m.id ASC
     LIMIT ?
   `;
 
-  const res = await db.prepare(query).bind(userId, now, since, limit + 1).all<MessageWithSender>();
+  const res = await db.prepare(query).bind(userId, now, since, userId, limit + 1).all<MessageWithSender>();
   const rows = res.results;
   const has_more = rows.length > limit;
   const messages = has_more ? rows.slice(0, limit) : rows;
+  const enriched = await enrichMessagesWithMedia(db, messages);
 
   return {
-    messages,
+    messages: enriched,
     sync_timestamp: now,
     has_more,
   };
+}
+
+export async function enrichMessagesWithMedia(
+  db: D1Database,
+  messages: MessageWithSender[]
+): Promise<MessageWithSender[]> {
+  if (!messages || messages.length === 0) return messages;
+
+  const voiceMsgIds = messages.filter((m) => m.type === 'voice').map((m) => m.id);
+  const imageMsgIds = messages.filter((m) => m.type === 'image').map((m) => m.id);
+  const fileMsgIds = messages.filter((m) => m.type === 'file').map((m) => m.id);
+
+  if (voiceMsgIds.length === 0 && imageMsgIds.length === 0 && fileMsgIds.length === 0) {
+    return messages;
+  }
+
+  const voiceMap = new Map<string, VoiceMessageRow>();
+  const imageMap = new Map<string, ImageMessageRow>();
+  const fileMap = new Map<string, FileMessageRow>();
+
+  if (voiceMsgIds.length > 0) {
+    const placeholders = voiceMsgIds.map(() => '?').join(',');
+    const voiceRows = await db.prepare(
+      `SELECT * FROM voice_messages WHERE message_id IN (${placeholders})`
+    ).bind(...voiceMsgIds).all<VoiceMessageRow>();
+    for (const v of voiceRows.results) {
+      voiceMap.set(v.message_id, v);
+    }
+  }
+
+  if (imageMsgIds.length > 0) {
+    const placeholders = imageMsgIds.map(() => '?').join(',');
+    const imageRows = await db.prepare(
+      `SELECT * FROM image_messages WHERE message_id IN (${placeholders})`
+    ).bind(...imageMsgIds).all<ImageMessageRow>();
+    for (const img of imageRows.results) {
+      imageMap.set(img.message_id, img);
+    }
+  }
+
+  if (fileMsgIds.length > 0) {
+    const placeholders = fileMsgIds.map(() => '?').join(',');
+    const fileRows = await db.prepare(
+      `SELECT * FROM file_messages WHERE message_id IN (${placeholders})`
+    ).bind(...fileMsgIds).all<FileMessageRow>();
+    for (const f of fileRows.results) {
+      fileMap.set(f.message_id, f);
+    }
+  }
+
+  for (const m of messages) {
+    if (m.type === 'voice') {
+      m.voice = voiceMap.get(m.id) ?? null;
+    } else if (m.type === 'image') {
+      m.image = imageMap.get(m.id) ?? null;
+    } else if (m.type === 'file') {
+      m.file = fileMap.get(m.id) ?? null;
+    }
+  }
+
+  return messages;
 }
 
 export async function acknowledgeDelivery(
@@ -335,13 +431,12 @@ export async function acknowledgeRead(
     }
 
     if (msg.retention === 'on_read') {
-      // Burn on read: in 1:1, burns immediately; in group, burns only when ALL recipients have read
+      // Burn on read: in both 1:1 and groups, reading burns the message for this recipient.
+      // Full dual-storage destruction in D1 & R2 occurs when ALL recipients have read.
       if (allRead) {
         await destroyMessage(db, r2, id);
-        burned.push(id);
-      } else {
-        read.push(id);
       }
+      burned.push(id);
     } else {
       if (allRead && msg.status !== 'read') {
         await db.prepare(`
