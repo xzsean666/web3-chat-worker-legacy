@@ -103,6 +103,7 @@ DONE
 - `test/db.test.ts`
 - `test/cleanup.test.ts`
 - `test/e2e.test.ts`
+- `scripts/live-e2e.ts`
 - `docs/FRONTEND_INTEGRATION.md`
 - `docs/AI/ARCHITECTURE.md`
 - `docs/AI/DECISIONS.md`
@@ -114,6 +115,9 @@ DONE
 ## Verification Commands & Results
 - `pnpm run typecheck`: Success (zero type errors across all source and test files).
 - `pnpm test`: Success (58/58 tests passing across 11 test suites with 100% pass rate).
+- `pnpm wrangler d1 migrations apply DB --remote`: Success (0003_media_messages.sql executed on remote D1).
+- `pnpm wrangler deploy`: Success (deployed to Cloudflare Workers).
+- `pnpm run test:live`: Success (12/12 live integration steps passed against remote Cloudflare Worker & D1/R2).
 
 ## Unresolved Issues
 None.

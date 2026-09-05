@@ -144,6 +144,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 
 - `nonce` 为可选字段，但强烈建议携带。服务端验证通过后会**立即销毁该 Nonce**（防止重放攻击）。
 - **成功响应 (`HTTP 200`)**：
+
   ```json
   {
     "token": "d748f...64位随机高熵token",
@@ -185,6 +186,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 - **接口路径**：`POST WORKER_BASE_URL/auth/logout`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
 - **成功响应 (`HTTP 200`)**：
+
   ```json
   {
     "success": true
@@ -212,6 +214,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   ```
 
   或
+
   ```json
   {
     "target_user_id": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2"
@@ -295,6 +298,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 ## 5. 模块三：主权群聊管理 (Sovereign Groups)
 
 系统采用 **Web3 自主权群组（Sovereign Groups）** 架构：
+
 - **群 ID 规范**：格式为 `${owner_address}:${slug}`（例如 `0xa284...:buidlers`）。群 ID 与创建者钱包地址永久强绑定。
 - **单主权管理模型**：一个群永久属于创建者（`owner`），**群主不可移交**。只有群主有权修改群名、邀请成员、移除成员；其他成员仅有权在群内发言及主动退群。这保证了跨节点合并数据时永远不会发生权限冲突。
 
@@ -303,6 +307,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 - **接口路径**：`POST WORKER_BASE_URL/groups`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
 - **请求体 (Content-Type: application/json)**：
+
   ```json
   {
     "name": "Web3 BUIDLers DAO",
@@ -379,6 +384,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 - **接口路径**：`POST WORKER_BASE_URL/conversations/:id/messages`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
 - **请求体 (Content-Type: application/json)**：
+
   ```json
   {
     "content": "Hello, Bob! Are you ready for Web3?",
@@ -395,6 +401,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
     - `"on_read"`：阅后即焚，接收方调用已读 ACK 后服务端立即物理删除。
   - `expires_in_seconds`：消息生命周期（秒），默认为 86400 秒（24 小时）。
 - **成功响应 (`HTTP 201`)**：
+
   ```json
   {
     "id": "36037617-81d9-4226-aecc-317d53dabd7a",
@@ -416,9 +423,11 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 - **接口路径**：`GET WORKER_BASE_URL/conversations/:id/messages`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
 - **查询参数 (Query Parameters)**：
+
   - `after_id` (可选)：游标 Message ID。传入后拉取该消息**之后**的新消息。
   - `limit` (可选)：每次拉取条数，默认 `50`，最大 `100`。
 - **成功响应 (`HTTP 200`)**：
+
   ```json
   {
     "messages": [
@@ -540,6 +549,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 - **接口路径**：`POST WORKER_BASE_URL/messages/ack`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
 - **请求体 (Content-Type: application/json)**：
+
   ```json
   {
     "message_ids": [
@@ -550,6 +560,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   }
   ```
 - **成功响应 (`HTTP 200`)**：
+
   ```json
   {
     "acknowledged": ["msg-id-1", "msg-id-2"],
@@ -656,6 +667,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 ### 7.6 客户端本地存储与服务端中继定位 (Local-First Sovereign Storage)
 
 前端集成时请遵循 Web3 **Local-First（本地优先）** 架构模式：
+
 1. **服务端为无状态暂存中继（Ephemeral Transit Node）**：消息完成全员阅后即焚或 TTL 到期后，服务端会彻底清空 D1 与 R2 数据，不维护永久云端档案。
 2. **客户端为主权数据中心（Sovereign Store）**：前端调用 `/sync` 或 `/conversations/:id/messages` 收到数据后，应立即落盘至客户端本地沙盒（如浏览器的 **IndexedDB / OPFS**，移动端的 **SQLite**）。
 3. 即使服务端后续销毁了中继副本，只要接收方在销毁前已成功拉取入库，用户即可永久离线查阅自己的聊天记录。
@@ -770,6 +782,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 支持 `multipart/form-data`（浏览器 File 对象）与 `application/json`（Base64 字符串）。
 
 #### 方式一：FormData 上传 (推荐)
+
 - **请求路径**：`POST WORKER_BASE_URL/images/upload`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
 - **请求格式**：`multipart/form-data`
@@ -812,6 +825,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   ```
 
 #### 方式二：Base64 上传
+
 - **请求路径**：`POST WORKER_BASE_URL/images/upload`
 - **请求体 (application/json)**：
   ```json
@@ -854,6 +868,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 ### 9.3 文件消息上传 (POST /files/upload)
 
 #### 方式一：FormData 上传 (推荐)
+
 - **请求路径**：`POST WORKER_BASE_URL/files/upload`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
 - **请求格式**：`multipart/form-data`
@@ -893,6 +908,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   ```
 
 #### 方式二：Base64 上传
+
 - **请求路径**：`POST WORKER_BASE_URL/files/upload`
 - **请求体 (application/json)**：
   ```json

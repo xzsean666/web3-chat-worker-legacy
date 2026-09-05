@@ -53,7 +53,12 @@ async function request(path: string, options: RequestInit = {}) {
   let data: any = null;
   if (contentType.includes('application/json')) {
     data = await res.json().catch(() => null);
-  } else if (contentType.includes('audio') || contentType.includes('octet-stream')) {
+  } else if (
+    contentType.includes('audio') ||
+    contentType.includes('image') ||
+    contentType.includes('octet-stream') ||
+    contentType.includes('pdf')
+  ) {
     data = await res.arrayBuffer();
   } else {
     data = await res.text();
@@ -350,8 +355,204 @@ async function main() {
   }
   logSuccess(`Verified dual-storage destruction: subsequent download returned HTTP 404`);
 
-  // 7. Incremental Sync & Batch ACK
-  logStep('Step 7', 'Incremental Global Sync & Batch ACK');
+  // 7. Image Upload (R2) & Burn-on-Read Dual Destruction
+  logStep('Step 7', 'Image Upload (R2), Metadata, Streaming & Burn-on-Read');
+  const syntheticPng = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41,
+    0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+    0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+  ]);
+  const imageBase64 = Buffer.from(syntheticPng).toString('base64');
+
+  // Alice uploads image to group with retention: 'on_read'
+  const imgUploadRes = await request('/images/upload', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${alice.token}`,
+    },
+    body: JSON.stringify({
+      conversation_id: groupId,
+      image_base64: imageBase64,
+      file_name: 'group_avatar.png',
+      mime_type: 'image/png',
+      width: 1,
+      height: 1,
+      caption: 'Initial Group Avatar',
+      retention: 'on_read',
+    }),
+  });
+  if (imgUploadRes.status !== 201 || !imgUploadRes.data?.image?.object_key) {
+    throw new Error(`Image upload failed: ${JSON.stringify(imgUploadRes.data)}`);
+  }
+  const imgMsgId = imgUploadRes.data.message.id;
+  const imgKey = imgUploadRes.data.image.object_key;
+  logSuccess(`Alice uploaded image message (ID: ${imgMsgId}, R2 key: ${imgKey}, retention: on_read)`);
+
+  // Charlie fetches metadata
+  const imgMetaRes = await request(`/images/${imgMsgId}/meta`, {
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  if (imgMetaRes.status !== 200 || imgMetaRes.data?.width !== 1 || imgMetaRes.data?.file_name !== 'group_avatar.png') {
+    throw new Error(`Image metadata fetch failed: ${JSON.stringify(imgMetaRes.data)}`);
+  }
+  logSuccess(`Charlie fetched image metadata (file_name: group_avatar.png, 1x1, size: ${imgMetaRes.data.size})`);
+
+  // Charlie streams the image binary from R2
+  const imgStreamRes = await request(`/images/${imgMsgId}`, {
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  if (imgStreamRes.status !== 200 || !imgStreamRes.headers.get('Content-Type')?.includes('image/png')) {
+    throw new Error(`Failed to stream image: status=${imgStreamRes.status}`);
+  }
+  const downloadedImgBytes = new Uint8Array(imgStreamRes.data as ArrayBuffer);
+  if (downloadedImgBytes.length !== syntheticPng.length) {
+    throw new Error(`Image byte length mismatch! Sent: ${syntheticPng.length}, Received: ${downloadedImgBytes.length}`);
+  }
+  logSuccess(`Charlie streamed and verified ${downloadedImgBytes.length}-byte PNG binary from R2`);
+
+  // Charlie reads the image message (1 of 2 recipients)
+  const charlieImgRead = await request(`/messages/${imgMsgId}/read`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  if (charlieImgRead.status !== 200 || charlieImgRead.data?.status !== 'burned') {
+    throw new Error(`Expected status 'burned' for Charlie image read: ${JSON.stringify(charlieImgRead.data)}`);
+  }
+  logSuccess(`Charlie read image message (status: burned, image preserved in R2 for Bob)`);
+
+  // Charlie re-download attempt should be rejected with 404
+  const charlieImgRepeat = await request(`/images/${imgMsgId}`, {
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  if (charlieImgRepeat.status !== 404) {
+    throw new Error(`Expected HTTP 404 for Charlie repeat image view, got: ${charlieImgRepeat.status}`);
+  }
+  logSuccess(`Verified Charlie cannot re-fetch image after reading (HTTP 404)`);
+
+  // Bob reads the image message (2 of 2 recipients -> triggers dual destruction)
+  const bobImgRead = await request(`/messages/${imgMsgId}/read`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${bob.token}` },
+  });
+  if (bobImgRead.status !== 200 || bobImgRead.data?.status !== 'burned') {
+    throw new Error(`Burn-on-read failed for Bob image read: ${JSON.stringify(bobImgRead.data)}`);
+  }
+  logSuccess(`Bob read image message -> All recipients read -> Burn-on-read triggered`);
+
+  // Subsequent download by Bob should return 404
+  const deadImgDownload = await request(`/images/${imgMsgId}`, {
+    headers: { Authorization: `Bearer ${bob.token}` },
+  });
+  if (deadImgDownload.status !== 404) {
+    throw new Error(`Expected HTTP 404 for burned image, got: ${deadImgDownload.status}`);
+  }
+  logSuccess(`Verified image dual-storage destruction: subsequent download returned HTTP 404`);
+
+  // 8. File Upload (R2), Path Sanitization, Download & Dual Destruction
+  logStep('Step 8', 'File Upload (R2), Path Sanitization, Download & Dual Destruction');
+  const syntheticFile = new TextEncoder().encode('%PDF-1.4\n%Web3 Chat Live E2E Audit Contract\n' + 'B'.repeat(128));
+  const fileBase64 = Buffer.from(syntheticFile).toString('base64');
+
+  // Alice uploads file with directory traversal attempt in name
+  const fileUploadRes = await request('/files/upload', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${alice.token}`,
+    },
+    body: JSON.stringify({
+      conversation_id: groupId,
+      file_base64: fileBase64,
+      file_name: '../../secret_audit_report.pdf',
+      mime_type: 'application/pdf',
+      caption: 'DAO Audit Report v1',
+      retention: 'on_read',
+    }),
+  });
+  if (fileUploadRes.status !== 201 || !fileUploadRes.data?.file?.object_key) {
+    throw new Error(`File upload failed: ${JSON.stringify(fileUploadRes.data)}`);
+  }
+  const fileMsgId = fileUploadRes.data.message.id;
+  const fileKey = fileUploadRes.data.file.object_key;
+  const sanitizedName = fileUploadRes.data.file.file_name;
+  if (sanitizedName !== 'secret_audit_report.pdf') {
+    throw new Error(`Expected sanitized file name 'secret_audit_report.pdf', got '${sanitizedName}'`);
+  }
+  logSuccess(`Alice uploaded file message (ID: ${fileMsgId}, R2 key: ${fileKey}, sanitized name: ${sanitizedName})`);
+
+  // Charlie fetches metadata
+  const fileMetaRes = await request(`/files/${fileMsgId}/meta`, {
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  if (fileMetaRes.status !== 200 || fileMetaRes.data?.file_name !== 'secret_audit_report.pdf') {
+    throw new Error(`File metadata fetch failed: ${JSON.stringify(fileMetaRes.data)}`);
+  }
+  logSuccess(`Charlie fetched file metadata (name: ${fileMetaRes.data.file_name}, size: ${fileMetaRes.data.size})`);
+
+  // Charlie downloads the file binary from R2
+  const fileDownloadRes = await request(`/files/${fileMsgId}`, {
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  if (fileDownloadRes.status !== 200) {
+    throw new Error(`Failed to download file: status=${fileDownloadRes.status}`);
+  }
+  const disposition = fileDownloadRes.headers.get('Content-Disposition') || '';
+  if (!disposition.includes('attachment; filename="secret_audit_report.pdf"')) {
+    throw new Error(`Missing or invalid Content-Disposition header: ${disposition}`);
+  }
+  const downloadedFileBytes = new Uint8Array(fileDownloadRes.data as ArrayBuffer);
+  if (downloadedFileBytes.length !== syntheticFile.length) {
+    throw new Error(`File byte length mismatch! Sent: ${syntheticFile.length}, Received: ${downloadedFileBytes.length}`);
+  }
+  logSuccess(`Charlie downloaded and verified ${downloadedFileBytes.length}-byte file with Content-Disposition header`);
+
+  // Charlie reads file message (1 of 2 recipients)
+  const charlieFileRead = await request(`/messages/${fileMsgId}/read`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  if (charlieFileRead.status !== 200 || charlieFileRead.data?.status !== 'burned') {
+    throw new Error(`Expected status 'burned' for Charlie file read: ${JSON.stringify(charlieFileRead.data)}`);
+  }
+  logSuccess(`Charlie read file message (status: burned, preserved for Bob)`);
+
+  // Charlie re-download attempt should be rejected with 404
+  const charlieFileRepeat = await request(`/files/${fileMsgId}`, {
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  if (charlieFileRepeat.status !== 404) {
+    throw new Error(`Expected HTTP 404 for Charlie repeat file download, got: ${charlieFileRepeat.status}`);
+  }
+  logSuccess(`Verified Charlie cannot re-download file after reading (HTTP 404)`);
+
+  // Bob reads the file message (2 of 2 recipients -> triggers dual destruction)
+  const bobFileRead = await request(`/messages/${fileMsgId}/read`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${bob.token}` },
+  });
+  if (bobFileRead.status !== 200 || bobFileRead.data?.status !== 'burned') {
+    throw new Error(`Burn-on-read failed for Bob file read: ${JSON.stringify(bobFileRead.data)}`);
+  }
+  logSuccess(`Bob read file message -> All recipients read -> Burn-on-read triggered`);
+
+  // Subsequent download returns 404
+  const deadFileDownload = await request(`/files/${fileMsgId}`, {
+    headers: { Authorization: `Bearer ${bob.token}` },
+  });
+  if (deadFileDownload.status !== 404) {
+    throw new Error(`Expected HTTP 404 for burned file, got: ${deadFileDownload.status}`);
+  }
+  logSuccess(`Verified file dual-storage destruction: subsequent download returned HTTP 404`);
+
+  // 9. Incremental Sync & Batch ACK
+  logStep('Step 9', 'Incremental Global Sync & Batch ACK');
   // Bob sends 2 text messages to the group
   const b1 = await request(`/conversations/${groupId}/messages`, {
     method: 'POST',
@@ -401,8 +602,8 @@ async function main() {
   }
   logSuccess(`Batch read ACK processed 2 message IDs in a single request`);
 
-  // 8. Message Expiration & Sweeper
-  logStep('Step 8', 'Message Expiration & Scheduled Sweeper');
+  // 10. Message Expiration & Sweeper
+  logStep('Step 10', 'Message Expiration & Scheduled Sweeper');
   // Alice sends message with 1 second expiration
   const expMsgRes = await request(`/conversations/${directConvId}/messages`, {
     method: 'POST',
@@ -423,8 +624,8 @@ async function main() {
   }
   logSuccess(`Scheduled sweeper purged ${sweepRes.data.purged_messages} expired message(s)`);
 
-  // 9. Session Logout & Revocation
-  logStep('Step 9', 'Session Logout & Revocation');
+  // 11. Session Logout & Revocation
+  logStep('Step 11', 'Session Logout & Revocation');
   const logoutRes = await request('/auth/logout', {
     method: 'POST',
     headers: { Authorization: `Bearer ${alice.token}` },

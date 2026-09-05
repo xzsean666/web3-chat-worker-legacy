@@ -66,19 +66,19 @@ export async function uploadFileMessage(
   const expiresAt = now + expiresInMs;
 
   const content = params.caption && params.caption.trim()
-    ? `${params.caption.trim()} (${rawFileName})`
-    : `[File: ${rawFileName}]`;
+    ? `${params.caption.trim()} (${safeFileName})`
+    : `[File: ${safeFileName}]`;
 
   // 5. Store in Cloudflare R2
   await r2.put(objectKey, params.fileData, {
     httpMetadata: {
       contentType: mimeType,
-      contentDisposition: `attachment; filename="${encodeURIComponent(rawFileName)}"; filename*=UTF-8''${encodeURIComponent(rawFileName)}`,
+      contentDisposition: `attachment; filename="${encodeURIComponent(safeFileName)}"; filename*=UTF-8''${encodeURIComponent(safeFileName)}`,
     },
     customMetadata: {
       messageId,
       conversationId: params.conversation_id,
-      fileName: rawFileName,
+      fileName: safeFileName,
     },
   });
 
@@ -93,7 +93,7 @@ export async function uploadFileMessage(
     INSERT INTO file_messages (
       id, message_id, object_key, file_name, mime_type, size, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).bind(fileId, messageId, objectKey, rawFileName, mimeType, byteLength, now).run();
+  `).bind(fileId, messageId, objectKey, safeFileName, mimeType, byteLength, now).run();
 
   await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, params.conversation_id).run();
 
@@ -115,7 +115,7 @@ export async function uploadFileMessage(
     id: fileId,
     message_id: messageId,
     object_key: objectKey,
-    file_name: rawFileName,
+    file_name: safeFileName,
     mime_type: mimeType,
     size: byteLength,
     created_at: now,

@@ -29,3 +29,6 @@ DONE
 ## Verification Commands & Results
 - `pnpm run typecheck`: 0 errors.
 - `pnpm test`: 58/58 tests passed across 11 test suites.
+- `pnpm wrangler d1 migrations apply DB --remote`: 0003_media_messages.sql applied to remote D1.
+- `pnpm wrangler deploy`: Successfully deployed to Cloudflare Workers.
+- `pnpm run test:live`: 12/12 live integration steps passed against real Cloudflare Worker (`https://web3-chat-worker.002788.xyz`) with D1 and R2.
