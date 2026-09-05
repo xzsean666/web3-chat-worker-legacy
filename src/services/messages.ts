@@ -22,6 +22,26 @@ export interface SyncOptions {
   limit?: number;
 }
 
+export interface RecipientReceipt {
+  user_id: string;
+  wallet_address: string;
+  status: 'pending' | 'delivered' | 'read';
+  delivered_at: number | null;
+  read_at: number | null;
+}
+
+export interface MessageReceiptsSummary {
+  message_id: string;
+  conversation_id: string;
+  sender_id: string;
+  total_recipients: number;
+  delivered_count: number;
+  read_count: number;
+  all_delivered: boolean;
+  all_read: boolean;
+  receipts: RecipientReceipt[];
+}
+
 export async function sendMessage(
   db: D1Database,
   conversationId: string,
@@ -191,11 +211,11 @@ export async function acknowledgeDelivery(
 
   for (const id of messageIds) {
     const msg = await db.prepare(`
-      SELECT m.id, m.sender_id, m.status
+      SELECT m.id, m.conversation_id, m.sender_id, m.status
       FROM messages m
       JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
       WHERE m.id = ?
-    `).bind(userId, id).first<{ id: string; sender_id: string; status: string }>();
+    `).bind(userId, id).first<{ id: string; conversation_id: string; sender_id: string; status: string }>();
 
     if (!msg || msg.sender_id === userId) {
       skipped.push(id);
@@ -207,7 +227,24 @@ export async function acknowledgeDelivery(
       VALUES (?, ?, ?, 'delivered', ?)
     `).bind(crypto.randomUUID(), id, userId, now).run();
 
-    if (msg.status === 'pending') {
+    // Calculate recipient count (all members in conversation except sender)
+    const memberRes = await db.prepare(`
+      SELECT COUNT(*) as count
+      FROM conversation_members
+      WHERE conversation_id = ? AND user_id != ?
+    `).bind(msg.conversation_id, msg.sender_id).first<{ count: number }>();
+    const recipientCount = memberRes?.count ?? 0;
+
+    // Calculate delivered count
+    const receiptRes = await db.prepare(`
+      SELECT COUNT(DISTINCT user_id) as count
+      FROM message_receipts
+      WHERE message_id = ? AND status IN ('delivered', 'read')
+    `).bind(id).first<{ count: number }>();
+    const deliveredCount = receiptRes?.count ?? 0;
+
+    // Transition message status only when ALL recipients have received it
+    if (recipientCount > 0 && deliveredCount >= recipientCount && msg.status === 'pending') {
       await db.prepare(`
         UPDATE messages SET status = 'delivered', delivered_at = ? WHERE id = ?
       `).bind(now, id).run();
@@ -253,16 +290,60 @@ export async function acknowledgeRead(
       UPDATE conversation_members SET last_read_message_id = ? WHERE conversation_id = ? AND user_id = ?
     `).bind(id, msg.conversation_id, userId).run();
 
+    // Ensure both delivered and read receipts are recorded
+    await db.prepare(`
+      INSERT OR IGNORE INTO message_receipts (id, message_id, user_id, status, timestamp)
+      VALUES (?, ?, ?, 'delivered', ?)
+    `).bind(crypto.randomUUID(), id, userId, now).run();
+
     await db.prepare(`
       INSERT OR IGNORE INTO message_receipts (id, message_id, user_id, status, timestamp)
       VALUES (?, ?, ?, 'read', ?)
     `).bind(crypto.randomUUID(), id, userId, now).run();
 
+    // Calculate recipient count (all members except sender)
+    const memberRes = await db.prepare(`
+      SELECT COUNT(*) as count
+      FROM conversation_members
+      WHERE conversation_id = ? AND user_id != ?
+    `).bind(msg.conversation_id, msg.sender_id).first<{ count: number }>();
+    const recipientCount = memberRes?.count ?? 0;
+
+    // Calculate read count
+    const readReceiptRes = await db.prepare(`
+      SELECT COUNT(DISTINCT user_id) as count
+      FROM message_receipts
+      WHERE message_id = ? AND status = 'read'
+    `).bind(id).first<{ count: number }>();
+    const readCount = readReceiptRes?.count ?? 0;
+
+    // Calculate delivered count
+    const deliveredReceiptRes = await db.prepare(`
+      SELECT COUNT(DISTINCT user_id) as count
+      FROM message_receipts
+      WHERE message_id = ? AND status IN ('delivered', 'read')
+    `).bind(id).first<{ count: number }>();
+    const deliveredCount = deliveredReceiptRes?.count ?? 0;
+
+    const allDelivered = recipientCount > 0 && deliveredCount >= recipientCount;
+    const allRead = recipientCount > 0 && readCount >= recipientCount;
+
+    if (allDelivered && msg.status === 'pending') {
+      await db.prepare(`
+        UPDATE messages SET status = 'delivered', delivered_at = COALESCE(delivered_at, ?) WHERE id = ?
+      `).bind(now, id).run();
+    }
+
     if (msg.retention === 'on_read') {
-      await destroyMessage(db, r2, id);
-      burned.push(id);
+      // Burn on read: in 1:1, burns immediately; in group, burns only when ALL recipients have read
+      if (allRead) {
+        await destroyMessage(db, r2, id);
+        burned.push(id);
+      } else {
+        read.push(id);
+      }
     } else {
-      if (msg.status !== 'read') {
+      if (allRead && msg.status !== 'read') {
         await db.prepare(`
           UPDATE messages SET status = 'read', read_at = ? WHERE id = ?
         `).bind(now, id).run();
@@ -272,4 +353,97 @@ export async function acknowledgeRead(
   }
 
   return { read, burned, skipped };
+}
+
+export async function getMessageReceipts(
+  db: D1Database,
+  userId: string,
+  messageId: string
+): Promise<MessageReceiptsSummary> {
+  const msg = await db.prepare(`
+    SELECT id, conversation_id, sender_id
+    FROM messages
+    WHERE id = ?
+  `).bind(messageId).first<{ id: string; conversation_id: string; sender_id: string }>();
+
+  if (!msg) {
+    throw new Error('Message not found or already destroyed');
+  }
+
+  const membership = await db.prepare(`
+    SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?
+  `).bind(msg.conversation_id, userId).first();
+
+  if (!membership) {
+    throw new Error('Unauthorized: you are not a member of this conversation');
+  }
+
+  const membersRes = await db.prepare(`
+    SELECT cm.user_id, u.wallet_address
+    FROM conversation_members cm
+    JOIN users u ON u.id = cm.user_id
+    WHERE cm.conversation_id = ? AND cm.user_id != ?
+    ORDER BY cm.joined_at ASC
+  `).bind(msg.conversation_id, msg.sender_id).all<{ user_id: string; wallet_address: string }>();
+
+  const recipients = membersRes.results;
+
+  const receiptsRes = await db.prepare(`
+    SELECT user_id, status, timestamp
+    FROM message_receipts
+    WHERE message_id = ?
+  `).bind(messageId).all<{ user_id: string; status: 'delivered' | 'read'; timestamp: number }>();
+
+  const receiptMap = new Map<string, { delivered_at: number | null; read_at: number | null }>();
+  for (const r of receiptsRes.results) {
+    const cur = receiptMap.get(r.user_id) || { delivered_at: null, read_at: null };
+    if (r.status === 'delivered') {
+      cur.delivered_at = r.timestamp;
+    } else if (r.status === 'read') {
+      cur.read_at = r.timestamp;
+      if (!cur.delivered_at) {
+        cur.delivered_at = r.timestamp;
+      }
+    }
+    receiptMap.set(r.user_id, cur);
+  }
+
+  const recipientList: RecipientReceipt[] = recipients.map((r) => {
+    const rec = receiptMap.get(r.user_id);
+    const delivered_at = rec?.delivered_at ?? null;
+    const read_at = rec?.read_at ?? null;
+    let status: 'pending' | 'delivered' | 'read' = 'pending';
+    if (read_at) {
+      status = 'read';
+    } else if (delivered_at) {
+      status = 'delivered';
+    }
+    return {
+      user_id: r.user_id,
+      wallet_address: r.wallet_address,
+      status,
+      delivered_at,
+      read_at,
+    };
+  });
+
+  const total_recipients = recipientList.length;
+  const delivered_count = recipientList.filter(
+    (r) => r.status === 'delivered' || r.status === 'read'
+  ).length;
+  const read_count = recipientList.filter((r) => r.status === 'read').length;
+  const all_delivered = total_recipients > 0 && delivered_count === total_recipients;
+  const all_read = total_recipients > 0 && read_count === total_recipients;
+
+  return {
+    message_id: msg.id,
+    conversation_id: msg.conversation_id,
+    sender_id: msg.sender_id,
+    total_recipients,
+    delivered_count,
+    read_count,
+    all_delivered,
+    all_read,
+    receipts: recipientList,
+  };
 }

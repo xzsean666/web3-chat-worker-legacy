@@ -318,14 +318,51 @@ High-performance multi-conversation delta sync for mobile/browser clients.
 #### `POST /messages/:id/ack` & `POST /messages/ack`
 Explicit client delivery acknowledgement upon downloading messages.
 - **Batch Body**: `{ "message_ids": ["m1", "m2"] }`
-- **Effect**: Transitions message status from `pending` -> `delivered`. Records receipt in `message_receipts`.
+- **Effect**: Records receipt in `message_receipts`.
+  - In **1:1 chats**: transitions `messages.status` from `pending` -> `delivered` immediately.
+  - In **1:N group chats**: records per-recipient delivery; transitions aggregate `messages.status` to `delivered` only when **all** other group members have acknowledged delivery.
 
 #### `POST /messages/:id/read` & `POST /messages/read`
 Read acknowledgement when the user views the message.
 - **Batch Body**: `{ "message_ids": ["m1", "m2"] }`
 - **Effect**:
-  - For `permanent` messages: Transitions status to `read`.
-  - For `on_read` messages: **Atomically destroys** the message row in D1 and the associated voice audio binary in R2. Subsequent attempts to fetch or stream return 404.
+  - For `permanent` messages: Transitions status to `read` (when all recipients have read in groups).
+  - For `on_read` messages:
+    - In **1:1 chats**: Atomically destroys the message row in D1 and R2 audio binary immediately.
+    - In **1:N group chats**: Delays destruction until **all** recipients have read the message (ensuring no member misses it), or until `expires_at` cron sweeper purges it.
+
+#### `GET /messages/:id/receipts`
+Inspect delivery and read progress for each recipient in direct or group chats.
+- **Access**: Restricted to conversation members.
+- **Response**: `200 OK`
+  ```json
+  {
+    "message_id": "m_uuid",
+    "conversation_id": "c_uuid",
+    "sender_id": "u_alice",
+    "total_recipients": 2,
+    "delivered_count": 2,
+    "read_count": 1,
+    "all_delivered": true,
+    "all_read": false,
+    "receipts": [
+      {
+        "user_id": "u_bob",
+        "wallet_address": "0x123...bob",
+        "status": "read",
+        "delivered_at": 1725514000000,
+        "read_at": 1725514005000
+      },
+      {
+        "user_id": "u_charlie",
+        "wallet_address": "0x456...charlie",
+        "status": "delivered",
+        "delivered_at": 1725514002000,
+        "read_at": null
+      }
+    ]
+  }
+  ```
 
 ---
 

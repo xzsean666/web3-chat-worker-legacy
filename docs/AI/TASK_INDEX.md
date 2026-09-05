@@ -11,3 +11,4 @@
 | [TASK-007](tasks/TASK-007.md) | Voice Message Storage (R2) & Synchronized Cleanup | TASK-006 | DONE | R2 audio upload, voice metadata in D1, dual-storage deletion on burn/read |
 | [TASK-008](tasks/TASK-008.md) | Scheduled Expiration Cleanup & Cron Worker | TASK-007 | DONE | Scheduled cron handler to sweep expired messages and orphan R2 voice files |
 | [TASK-009](tasks/TASK-009.md) | End-to-End Integration Verification & API Docs | TASK-008 | DONE | Full lifecycle E2E test suite, API documentation, and deployment guidelines |
+| [TASK-010](tasks/TASK-010.md) | Group Chat 1:N Delivery Rollup, Burn-on-Read Synchronization & Message Receipts API | TASK-009 | DONE | Group delivery rollup, group burn-on-read synchronization, and receipts query API |

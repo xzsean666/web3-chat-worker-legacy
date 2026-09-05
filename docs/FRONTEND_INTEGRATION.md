@@ -552,6 +552,59 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   }
   ```
 
+### 7.5 查询消息送达与已读明细 (Message Receipts)
+
+在群聊中，发送方或群成员可以通过此接口查询消息在各成员设备上的具体接收与阅读状态（解决群聊 1:N 状态下谁收到、谁未收到的精准感知）：
+
+- **接口路径**：`GET WORKER_BASE_URL/messages/:id/receipts`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`（必须为该会话成员）
+- **群聊 1:N 聚合判定规则**：
+  - **全员送达 (`all_delivered`)**：当且仅当群内所有其他成员都上报了 `delivered` 回执时为 `true`；此时主消息 `messages.status` 才会流转为 `"delivered"`。
+  - **群聊阅后即焚 (`on_read`)**：只有当所有成员均已完成阅读 (`all_read === true`)，服务端才真正触发 D1 + R2 物理销毁；只要还有成员未读，其他成员阅读后返回 `"read"`，消息保留至全员读完或 `expires_at` 超时被 cron 强制销毁。
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "message_id": "36037617-81d9-4226-aecc-317d53dabd7a",
+    "conversation_id": "a310eec6-82ab-479a-8a3b-8510ae8a1560",
+    "sender_id": "7d82a793-c6b4-4b29-b7b7-1114f8c4f625",
+    "total_recipients": 3,
+    "delivered_count": 2,
+    "read_count": 1,
+    "all_delivered": false,
+    "all_read": false,
+    "receipts": [
+      {
+        "user_id": "cd218012-0faf-44aa-849a-38e174639ff7",
+        "wallet_address": "0x41a0706a3636ce383a69054f52b46ac980743a1d",
+        "status": "read",
+        "delivered_at": 1788587860000,
+        "read_at": 1788587865000
+      },
+      {
+        "user_id": "85d7d882-590d-4d16-8f5e-57676a6b50ac",
+        "wallet_address": "0x52b0806a3636ce383a69054f52b46ac980743b2e",
+        "status": "delivered",
+        "delivered_at": 1788587862000,
+        "read_at": null
+      },
+      {
+        "user_id": "99e12012-0faf-44aa-849a-38e174639cc1",
+        "wallet_address": "0x63c0906a3636ce383a69054f52b46ac980743c3f",
+        "status": "pending",
+        "delivered_at": null,
+        "read_at": null
+      }
+    ]
+  }
+  ```
+
+### 7.6 客户端本地存储与服务端中继定位 (Local-First Sovereign Storage)
+
+前端集成时请遵循 Web3 **Local-First（本地优先）** 架构模式：
+1. **服务端为无状态暂存中继（Ephemeral Transit Node）**：消息完成全员阅后即焚或 TTL 到期后，服务端会彻底清空 D1 与 R2 数据，不维护永久云端档案。
+2. **客户端为主权数据中心（Sovereign Store）**：前端调用 `/sync` 或 `/conversations/:id/messages` 收到数据后，应立即落盘至客户端本地沙盒（如浏览器的 **IndexedDB / OPFS**，移动端的 **SQLite**）。
+3. 即使服务端后续销毁了中继副本，只要接收方在销毁前已成功拉取入库，用户即可永久离线查阅自己的聊天记录。
+
 ---
 
 ## 8. 模块六：语音消息上传与播放 (Voice & R2)

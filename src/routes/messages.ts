@@ -6,6 +6,7 @@ import {
   getConversationMessages,
   acknowledgeDelivery,
   acknowledgeRead,
+  getMessageReceipts,
   type SendMessageOptions,
 } from '../services/messages';
 
@@ -123,6 +124,24 @@ messageRoutes.post('/messages/:id/read', async (c) => {
     });
   } catch (err: any) {
     return c.json({ error: err.message }, 500);
+  }
+});
+
+// Query message receipts (per-recipient delivery & read status)
+messageRoutes.get('/messages/:id/receipts', async (c) => {
+  try {
+    const user = c.get('user');
+    const messageId = c.req.param('id');
+
+    const result = await getMessageReceipts(c.env.DB, user.id, messageId);
+    return c.json(result);
+  } catch (err: any) {
+    const status = err.message.includes('Unauthorized')
+      ? 403
+      : err.message.includes('not found')
+      ? 404
+      : 400;
+    return c.json({ error: err.message }, status);
   }
 });
 

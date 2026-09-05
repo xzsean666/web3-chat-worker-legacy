@@ -303,15 +303,34 @@ async function main() {
   }
   logSuccess(`Charlie downloaded and verified 256-byte audio binary from R2`);
 
-  // Charlie reads the voice message -> triggers Burn-on-Read
-  const burnRes = await request(`/messages/${voiceMsgId}/read`, {
+  // Charlie reads the voice message (1 of 2 recipients)
+  const charlieReadRes = await request(`/messages/${voiceMsgId}/read`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${charlie.token}` },
   });
-  if (burnRes.status !== 200 || burnRes.data?.status !== 'burned') {
-    throw new Error(`Burn-on-read failed: ${JSON.stringify(burnRes.data)}`);
+  if (charlieReadRes.status !== 200 || charlieReadRes.data?.status !== 'read') {
+    throw new Error(`Expected status 'read' for Charlie partial read, got: ${JSON.stringify(charlieReadRes.data)}`);
   }
-  logSuccess(`Charlie read message -> Burn-on-read triggered (status: burned)`);
+  logSuccess(`Charlie read voice message (status: read, waiting for Bob before burning)`);
+
+  // Alice checks message receipts
+  const receiptsRes = await request(`/messages/${voiceMsgId}/receipts`, {
+    headers: { Authorization: `Bearer ${alice.token}` },
+  });
+  if (receiptsRes.status !== 200 || receiptsRes.data?.read_count !== 1 || receiptsRes.data?.all_read !== false) {
+    throw new Error(`Receipts query failed or invalid rollup: ${JSON.stringify(receiptsRes.data)}`);
+  }
+  logSuccess(`Receipts verified: Charlie (read), Bob (pending), all_read=false`);
+
+  // Bob reads the voice message (2 of 2 recipients -> triggers dual destruction)
+  const bobReadRes = await request(`/messages/${voiceMsgId}/read`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${bob.token}` },
+  });
+  if (bobReadRes.status !== 200 || bobReadRes.data?.status !== 'burned') {
+    throw new Error(`Burn-on-read failed: ${JSON.stringify(bobReadRes.data)}`);
+  }
+  logSuccess(`Bob read message -> All recipients read -> Burn-on-read triggered (status: burned)`);
 
   // Verify subsequent download returns 404 (deleted from both D1 & R2)
   const deadDownload = await request(`/voice/${voiceMsgId}`, {

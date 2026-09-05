@@ -105,13 +105,26 @@ To satisfy client performance and simple interaction:
   `POST /messages/ack` with body `{"message_ids": ["msg_1", "msg_2"]}`
   `POST /messages/read` with body `{"message_ids": ["msg_1"]}`
   Reduces roundtrip latency on mobile and browser clients.
+- **Receipts Inspection API**:
+  `GET /messages/:id/receipts`
+  Returns delivery & read status for each recipient in direct or group chats (`pending`, `delivered`, `read`), along with aggregated counts (`delivered_count`, `read_count`, `all_delivered`, `all_read`).
 
-## 4. Ephemeral Lifecycle & Destruction
-- **Delivered ACK**: Receiver client sends ACK upon downloading message. Status transitions to `delivered`.
-- **Read ACK & Burn-on-read**:
-  When receiver client reads an `on_read` message:
-  1. If message type is `voice`, read object key from `voice_messages` and call `R2.delete(object_key)`.
-  2. Delete D1 record from `messages` (cascading to `voice_messages` and `message_receipts`).
+## 4. Ephemeral Lifecycle & 1:N Group Delivery Rollup
+- **Per-Recipient Delivery Tracking**:
+  Each recipient acknowledges delivery individually. In 1:1 chats, message status becomes `delivered` upon the recipient's ACK. In 1:N group chats, `messages.status` transitions to `delivered` only when **all** other members have acknowledged delivery.
+- **Read ACK & Burn-on-Read Synchronization**:
+  When a recipient reads an `on_read` message:
+  1. In 1:1 chat, reading the message immediately triggers atomic dual-storage destruction.
+  2. In 1:N group chat, destruction is delayed until **all** recipients have read the message, ensuring no member misses the message.
+  3. Upon the final recipient's read ACK:
+     - If voice, delete R2 audio object from `voice_messages`.
+     - Delete D1 record from `messages` (cascading to `voice_messages` and `message_receipts`).
 - **Expiration Purge**:
   Messages with `expires_at <= now()` are filtered out in queries, and swept by a scheduled cron trigger:
   Find expired voice messages -> delete R2 files -> delete expired D1 message rows.
+
+## 5. Server Relay vs. Client Local-First Sovereign Storage
+- **Server Role (Ephemeral Mailbox / Transit Node)**:
+  Cloudflare D1 & R2 act strictly as a secure temporary delivery pipeline, not a permanent archive. Relayed data is purged immediately upon read completion or TTL expiration.
+- **Client Role (Local Sovereign Store)**:
+  Clients pull delta messages (`/sync`) and persist them into local client databases (IndexedDB / OPFS on Web, SQLite / MMKV on native apps). Even when server copies are burned or expired, users retain their local history independently under their own device and key control.

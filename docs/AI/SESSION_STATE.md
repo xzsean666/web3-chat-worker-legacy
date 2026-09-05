@@ -4,7 +4,7 @@
 Build a high-performance, single-node Cloudflare Worker Web3 Chat MVP supporting EVM wallet signature login, direct/group chat, text and voice messaging, explicit delivery ACK, burn-on-read, voice destruction (R2), and incremental sync.
 
 ## Current Task
-TASK-009: End-to-End Integration Verification & API Docs
+TASK-010: Group Chat 1:N Delivery Rollup, Burn-on-Read Synchronization & Message Receipts API
 
 ## Current Status
 DONE
@@ -50,6 +50,11 @@ DONE
 - TASK-008: Implemented `test/cleanup.test.ts` verifying automatic purging of expired messages and audio files, leaving active data untouched.
 - TASK-009: Implemented `test/e2e.test.ts` simulating full client journey: Auth -> 1:1 Chat -> Delivery ACK -> Read ACK -> Group Chat -> Voice Upload -> Binary Stream -> Burn-on-Read -> Expiry Sweep -> Logout.
 - TASK-009: Created comprehensive `README.md` with architecture diagrams, D1/R2 Cloudflare deployment steps, and complete REST API reference.
+- TASK-010: Implemented 1:N delivery rollup in `acknowledgeDelivery` ensuring group messages only transition to `delivered` when all recipients ACK.
+- TASK-010: Synchronized group burn-on-read in `acknowledgeRead` ensuring dual-storage destruction delays until all group members read.
+- TASK-010: Implemented `GET /messages/:id/receipts` and `getMessageReceipts` returning detailed per-member delivery and read status.
+- TASK-010: Added tests in `test/receipts.test.ts`, updated `test/e2e.test.ts` and `scripts/live-e2e.ts`.
+- TASK-010: Documented ADR-006, updated ARCHITECTURE.md, README.md, and FRONTEND_INTEGRATION.md with Local-First storage notes.
 
 ## Modified Files
 - `package.json`
@@ -91,16 +96,18 @@ DONE
 - `scripts/live-e2e.ts`
 - `docs/FRONTEND_INTEGRATION.md`
 - `docs/AI/TASK_INDEX.md`
-- `docs/AI/tasks/TASK-001.md` through `TASK-009.md`
+- `docs/AI/DECISIONS.md`
+- `docs/AI/ARCHITECTURE.md`
+- `docs/AI/tasks/TASK-001.md` through `TASK-010.md`
 - `docs/AI/SESSION_STATE.md`
 
 ## Verification Commands & Results
-- `pnpm run typecheck`: Success (zero type errors across all 25 source and test files).
-- `pnpm test`: Success (40/40 tests passing across 9 test suites with 100% pass rate).
+- `pnpm run typecheck`: Success (zero type errors across all source and test files).
+- `pnpm test`: Success (43/43 tests passing across 9 test suites with 100% pass rate).
 - `wrangler d1 execute web3_chat_db --remote --file=./migrations/0001_initial_schema.sql`: Success (21 queries executed).
 - `pnpm run deploy`: Success (deployed to Cloudflare Worker).
 - `pnpm run test:live`: Success (10/10 live E2E steps passed against custom domain without proxy/VPN).
-- `docs/FRONTEND_INTEGRATION.md`: Created comprehensive frontend integration guide using `WORKER_BASE_URL` placeholder.
+- `docs/FRONTEND_INTEGRATION.md`: Created comprehensive frontend integration guide with receipts and Local-First storage details.
 
 ## Unresolved Issues
 None.

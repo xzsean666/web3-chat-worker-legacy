@@ -29,3 +29,14 @@
 - **Context**: Burn-on-read (`on_read`) and expiration (`expires_at`) require simultaneous destruction of relational metadata in D1 and audio blobs in R2.
 - **Decision**: Atomic read-and-delete flow: retrieve R2 object keys from `voice_messages`, invoke `R2.delete()`, then execute SQL `DELETE FROM messages`. A scheduled background worker cron handles expired message sweeps.
 - **Consequences**: Zero orphaned audio files in R2 storage, strictly enforcing ephemeral security.
+
+## ADR-006: Group Chat 1:N Delivery Rollup & Burn-on-Read Synchronization
+- **Status**: Accepted
+- **Context**: In 1:N group messaging, multiple recipients pull and ACK at different times. If `messages.status` is set to `delivered` upon the first recipient's ACK, the sender is misled into believing all recipients received the message. Similarly, in burn-on-read (`on_read`), if the first recipient's read triggers immediate destruction, subsequent recipients are deprived of receiving the message.
+- **Decision**:
+  1. Rely on `message_receipts` as the source of truth for per-recipient delivery and read timestamps.
+  2. For 1:N group conversations, only transition aggregate `messages.status` to `delivered` or `read` when ALL non-sender conversation members have acknowledged delivery or read.
+  3. For `on_read` messages in groups, delay dual-storage destruction until ALL recipients have read the message (or until `expires_at` cron sweep).
+  4. Expose `GET /messages/:id/receipts` endpoint for conversation members to inspect delivery & read status of each recipient.
+  5. Decouple server-side ephemeral transit/destruction from client-side local sovereign storage (IndexedDB/SQLite).
+- **Consequences**: Accurate delivery tracking for senders, zero premature message destruction for group members, and full adherence to Web3 local-first sovereign data principles.

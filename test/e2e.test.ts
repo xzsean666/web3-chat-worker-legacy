@@ -183,14 +183,45 @@ describe('End-to-End Integration Suite', () => {
     const downloadedBytes = new Uint8Array(await downloadAudioRes.arrayBuffer());
     expect(downloadedBytes).toEqual(audioBytes);
 
-    // Charlie reads the ephemeral voice message (Burn-on-Read trigger)
-    const burnRes = await app.request(`/messages/${voiceMsgId}/read`, {
+    // Charlie reads the ephemeral voice message (1 of 2 group recipients read)
+    const charlieReadRes = await app.request(`/messages/${voiceMsgId}/read`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${charlie.token}` },
     }, env);
-    expect(burnRes.status).toBe(200);
-    const burnData = (await burnRes.json()) as any;
-    expect(burnData.status).toBe('burned');
+    expect(charlieReadRes.status).toBe(200);
+    const charlieReadData = (await charlieReadRes.json()) as any;
+    expect(charlieReadData.status).toBe('read'); // Not burned yet, waiting for Bob!
+
+    // Alice checks message receipts to see per-recipient delivery & read progress
+    const receiptsRes = await app.request(`/messages/${voiceMsgId}/receipts`, {
+      headers: { Authorization: `Bearer ${alice.token}` },
+    }, env);
+    expect(receiptsRes.status).toBe(200);
+    const receiptsData = (await receiptsRes.json()) as any;
+    expect(receiptsData.total_recipients).toBe(2);
+    expect(receiptsData.read_count).toBe(1);
+    expect(receiptsData.all_read).toBe(false);
+    const charlieRec = receiptsData.receipts.find((r: any) => r.user_id === charlie.user.id);
+    const bobRec = receiptsData.receipts.find((r: any) => r.user_id === bob.user.id);
+    expect(charlieRec.status).toBe('read');
+    expect(bobRec.status).toBe('pending');
+
+    // File is still preserved in R2 for Bob
+    expect(r2.hasKey(voiceKey)).toBe(true);
+
+    // Bob downloads and reads the ephemeral voice message (2 of 2 recipients -> all read -> burn triggered!)
+    const bobDownloadRes = await app.request(`/voice/${voiceMsgId}`, {
+      headers: { Authorization: `Bearer ${bob.token}` },
+    }, env);
+    expect(bobDownloadRes.status).toBe(200);
+
+    const bobReadRes = await app.request(`/messages/${voiceMsgId}/read`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${bob.token}` },
+    }, env);
+    expect(bobReadRes.status).toBe(200);
+    const bobReadData = (await bobReadRes.json()) as any;
+    expect(bobReadData.status).toBe('burned');
 
     // Dual-Storage Destruction verification:
     // 1) Audio binary removed from R2

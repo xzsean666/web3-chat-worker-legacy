@@ -198,4 +198,161 @@ describe('Explicit Delivery ACK & Burn-on-Read Lifecycle', () => {
     expect(batchReadData.read).toContain(m1.id);
     expect(batchReadData.read).toContain(m2.id);
   });
+
+  it('tracks per-recipient delivery in group chat and transitions message status only when all recipients ACK', async () => {
+    const charlieWallet = createTestWallet();
+    const charlieAuth = await loginUser(charlieWallet);
+
+    // Alice creates group with Bob and Charlie
+    const groupRes = await app.request('/groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aliceToken}` },
+      body: JSON.stringify({
+        name: 'Receipts Test Group',
+        member_ids: [bobUser.id, charlieAuth.user.id],
+      }),
+    }, env);
+    expect(groupRes.status).toBe(201);
+    const group = (await groupRes.json()) as any;
+
+    // Alice sends a message to group
+    const sendRes = await app.request(`/conversations/${group.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aliceToken}` },
+      body: JSON.stringify({ content: 'Group update' }),
+    }, env);
+    const msg = (await sendRes.json()) as any;
+    expect(msg.status).toBe('pending');
+
+    // Bob ACKs delivery (1 of 2 recipients)
+    const bobAckRes = await app.request(`/messages/${msg.id}/ack`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    expect(bobAckRes.status).toBe(200);
+
+    // Message status in DB should STILL be pending (Charlie hasn't received yet)
+    let inDb = await db.prepare('SELECT status, delivered_at FROM messages WHERE id = ?').bind(msg.id).first<any>();
+    expect(inDb.status).toBe('pending');
+    expect(inDb.delivered_at).toBeNull();
+
+    // Query receipts endpoint via GET /messages/:id/receipts
+    const receiptsRes1 = await app.request(`/messages/${msg.id}/receipts`, {
+      headers: { Authorization: `Bearer ${aliceToken}` },
+    }, env);
+    expect(receiptsRes1.status).toBe(200);
+    const receipts1 = (await receiptsRes1.json()) as any;
+    expect(receipts1.total_recipients).toBe(2);
+    expect(receipts1.delivered_count).toBe(1);
+    expect(receipts1.all_delivered).toBe(false);
+
+    const bobReceipt1 = receipts1.receipts.find((r: any) => r.user_id === bobUser.id);
+    const charlieReceipt1 = receipts1.receipts.find((r: any) => r.user_id === charlieAuth.user.id);
+    expect(bobReceipt1.status).toBe('delivered');
+    expect(charlieReceipt1.status).toBe('pending');
+
+    // Charlie now ACKs delivery (2 of 2 recipients)
+    const charlieAckRes = await app.request(`/messages/${msg.id}/ack`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${charlieAuth.token}` },
+    }, env);
+    expect(charlieAckRes.status).toBe(200);
+
+    // Now message status should transition to delivered
+    inDb = await db.prepare('SELECT status, delivered_at FROM messages WHERE id = ?').bind(msg.id).first<any>();
+    expect(inDb.status).toBe('delivered');
+    expect(inDb.delivered_at).toBeGreaterThan(0);
+
+    // Receipts summary reflects all delivered
+    const receiptsRes2 = await app.request(`/messages/${msg.id}/receipts`, {
+      headers: { Authorization: `Bearer ${charlieAuth.token}` },
+    }, env);
+    const receipts2 = (await receiptsRes2.json()) as any;
+    expect(receipts2.total_recipients).toBe(2);
+    expect(receipts2.delivered_count).toBe(2);
+    expect(receipts2.all_delivered).toBe(true);
+  });
+
+  it('delays burn-on-read in group chat until all recipients have read the message', async () => {
+    const charlieWallet = createTestWallet();
+    const charlieAuth = await loginUser(charlieWallet);
+
+    // Alice creates group with Bob and Charlie
+    const groupRes = await app.request('/groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aliceToken}` },
+      body: JSON.stringify({
+        name: 'Ephemeral Group',
+        member_ids: [bobUser.id, charlieAuth.user.id],
+      }),
+    }, env);
+    const group = (await groupRes.json()) as any;
+
+    // Alice sends ephemeral message
+    const sendRes = await app.request(`/conversations/${group.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aliceToken}` },
+      body: JSON.stringify({ content: 'Confidential group secret', retention: 'on_read' }),
+    }, env);
+    const msg = (await sendRes.json()) as any;
+
+    // Bob reads first
+    const bobReadRes = await app.request(`/messages/${msg.id}/read`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    expect(bobReadRes.status).toBe(200);
+    const bobReadData = (await bobReadRes.json()) as any;
+    expect(bobReadData.status).toBe('read'); // Not burned yet!
+
+    // Message must still exist in DB so Charlie can read it
+    let inDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msg.id).first();
+    expect(inDb).not.toBeNull();
+
+    // Check receipts: Bob read, Charlie pending
+    const receiptsRes = await app.request(`/messages/${msg.id}/receipts`, {
+      headers: { Authorization: `Bearer ${aliceToken}` },
+    }, env);
+    const receipts = (await receiptsRes.json()) as any;
+    expect(receipts.read_count).toBe(1);
+    expect(receipts.all_read).toBe(false);
+
+    // Charlie reads second (all recipients have now read)
+    const charlieReadRes = await app.request(`/messages/${msg.id}/read`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${charlieAuth.token}` },
+    }, env);
+    expect(charlieReadRes.status).toBe(200);
+    const charlieReadData = (await charlieReadRes.json()) as any;
+    expect(charlieReadData.status).toBe('burned'); // Burned triggered!
+
+    // Message must now be purged from D1
+    inDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msg.id).first();
+    expect(inDb).toBeNull();
+
+    // Query receipts on destroyed message returns 404
+    const deadReceiptsRes = await app.request(`/messages/${msg.id}/receipts`, {
+      headers: { Authorization: `Bearer ${aliceToken}` },
+    }, env);
+    expect(deadReceiptsRes.status).toBe(404);
+  });
+
+  it('rejects receipts query for non-members with HTTP 403', async () => {
+    const charlieWallet = createTestWallet();
+    const charlieAuth = await loginUser(charlieWallet);
+
+    // Alice sends direct message to Bob
+    const sendRes = await app.request(`/conversations/${conversationId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aliceToken}` },
+      body: JSON.stringify({ content: 'Private direct message' }),
+    }, env);
+    const msg = (await sendRes.json()) as any;
+
+    // Charlie (non-member of direct chat) attempts to view receipts
+    const receiptsRes = await app.request(`/messages/${msg.id}/receipts`, {
+      headers: { Authorization: `Bearer ${charlieAuth.token}` },
+    }, env);
+    expect(receiptsRes.status).toBe(403);
+  });
 });
