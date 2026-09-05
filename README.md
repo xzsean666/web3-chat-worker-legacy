@@ -191,14 +191,14 @@ Verify an EIP-191 `personal_sign` signature over the challenge message, create u
   {
     "token": "a4d9f0...",
     "user": {
-      "id": "u_uuid",
+      "id": "0x71c...8976f",
       "wallet_address": "0x71c...8976f",
       "created_at": 1725511200000,
       "updated_at": 1725511200000
     },
     "session": {
       "id": "s_uuid",
-      "user_id": "u_uuid",
+      "user_id": "0x71c...8976f",
       "expires_at": 1728103200000
     }
   }
@@ -209,7 +209,7 @@ Return currently authenticated user profile.
 - **Response**: `200 OK`
   ```json
   {
-    "user": { "id": "u_uuid", "wallet_address": "0x71c...8976f" }
+    "user": { "id": "0x71c...8976f", "wallet_address": "0x71c...8976f" }
   }
   ```
 
@@ -219,15 +219,18 @@ Revoke active session token immediately.
 
 ---
 
-### 2. Conversations & Groups (`/conversations`, `/groups`)
+### 2. Sovereign Groups & Conversations (`/conversations`, `/groups`)
+
+> [!TIP]
+> **Conflict-Free Multi-Node Merging**: User IDs are normalized EVM addresses (`0x...`). Direct chat IDs are deterministic (`direct:minAddress:maxAddress`). Group IDs are self-certifying (`${owner_address}:${slug}`). Groups have immutable single-ownership, enabling zero-conflict state merging across multiple Cloudflare Workers. See [CLOUDFLARE_DATA_MERGE.md](docs/CLOUDFLARE_DATA_MERGE.md) for details.
 
 #### `POST /conversations`
-Create or retrieve an idempotent direct 1-to-1 conversation.
+Create or retrieve an idempotent, deterministic direct 1-to-1 conversation (`direct:min:max`).
 - **Request Body**:
   ```json
-  { "target_user_id": "u_target" }
+  { "target_user_id": "0xbob..." }
   ```
-  *(or `{ "target_wallet_address": "0x..." }`)*
+  *(or `{ "target_wallet_address": "0xbob..." }`)*
 - **Response**: `201 Created` returns conversation details and member list.
 
 #### `GET /conversations`
@@ -236,7 +239,8 @@ List all conversations the authenticated user belongs to with member counts.
   ```json
   {
     "conversations": [
-      { "id": "c_uuid", "type": "direct", "name": null, "role": "owner", "member_count": 2 }
+      { "id": "direct:0xalice...:0xbob...", "type": "direct", "name": null, "role": "member", "member_count": 2 },
+      { "id": "0xalice...:buidlers", "type": "group", "name": "Web3 BUIDLers", "role": "owner", "member_count": 3 }
     ]
   }
   ```
@@ -246,26 +250,30 @@ Get conversation metadata and members.
 - **Response**: `200 OK`
 
 #### `POST /groups`
-Create a group conversation with the creator assigned as `owner`.
+Create a sovereign group conversation with the creator assigned as permanent `owner`.
 - **Request Body**:
   ```json
   {
     "name": "Web3 BUIDLers",
-    "member_ids": ["u_bob", "u_charlie"]
+    "member_ids": ["0xbob...", "0xcharlie..."],
+    "slug": "buidlers" // optional, defaults to 8-char random hex
   }
   ```
-- **Response**: `201 Created`
+- **Response**: `201 Created` (ID format: `0xcreatorAddress:slug`)
 
 #### `PATCH /groups/:id`
-Update group name (`owner` or `admin` only).
+Update group name (`owner` only; forbidden for non-owners with HTTP 403).
 - **Request Body**: `{ "name": "New Name" }`
 
 #### `POST /groups/:id/members`
-Add member to group (`owner` or `admin` only).
-- **Request Body**: `{ "user_id": "u_dave", "role": "member" }`
+Add member to group (`owner` only).
+- **Request Body**: `{ "user_id": "0xdave..." }` or `{ "wallet_address": "0xdave..." }`
 
 #### `DELETE /groups/:id/members/:userId`
-Remove member from group (`owner` can remove anyone, `admin` can remove `member`, or any member can leave).
+Remove member from group.
+- `owner` can remove any member.
+- Any member can leave voluntarily.
+- If the `owner` leaves, ownership cannot be transferred; the sovereign group is automatically deleted.
 
 ---
 

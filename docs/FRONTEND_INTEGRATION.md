@@ -147,21 +147,21 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   {
     "token": "d748f...64位随机高熵token",
     "user": {
-      "id": "7d82a793-c6b4-4b29-b7b7-1114f8c4f625",
+      "id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
       "wallet_address": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
       "created_at": 1788587857000,
       "updated_at": 1788587857000
     },
     "session": {
       "id": "18f50fa5-c496-4100-bda4-4861219b1650",
-      "user_id": "7d82a793-c6b4-4b29-b7b7-1114f8c4f625",
+      "user_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
       "expires_at": 1789192657000,
       "created_at": 1788587857000
     }
   }
   ```
 
-  - `token`：会话凭证，前端存入 `localStorage` 或安全存储区，有效期默认 **7 天**。
+  - `token`：会话凭证，前端存入 `localStorage` 或安全存储区，有效期默认 **30 天**。
 
 ### 3.3 获取当前登录用户信息
 
@@ -171,7 +171,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   ```json
   {
     "user": {
-      "id": "7d82a793-c6b4-4b29-b7b7-1114f8c4f625",
+      "id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
       "wallet_address": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
       "created_at": 1788587857000,
       "updated_at": 1788587857000
@@ -202,7 +202,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 - **接口路径**：`POST WORKER_BASE_URL/conversations`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
 - **请求体 (Content-Type: application/json)**：
-  支持通过 `target_user_id` 或 `target_wallet_address` 传参：
+  支持通过 `target_user_id` 或 `target_wallet_address` 传参（均统一为小写 0x 地址）：
 
   ```json
   {
@@ -213,34 +213,34 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   或
   ```json
   {
-    "target_user_id": "85d7d882-590d-4d16-8f5e-57676a6b50ac"
+    "target_user_id": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2"
   }
   ```
-- **幂等特性**：如果当前用户与对方已存在 1v1 会话，不会重复创建，直接返回既有会话详情。
+- **幂等特性**：如果当前用户与对方已存在 1v1 会话，不会重复创建，直接返回既有会话详情。单聊 ID 采用确定性格式：`direct:min(addrA, addrB):max(addrA, addrB)`。
 - **成功响应 (`HTTP 201`)**：
 
   ```json
   {
-    "id": "a310eec6-82ab-479a-8a3b-8510ae8a1560",
+    "id": "direct:0x1610725056c027d5ae4e2fce73bb925c82c59eaa:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
     "type": "direct",
     "name": null,
     "created_at": 1788587857000,
     "updated_at": 1788587857000,
-    "my_role": "owner",
+    "my_role": "member",
     "members": [
       {
-        "id": "member-uuid-1",
-        "conversation_id": "a310eec6-82ab-479a-8a3b-8510ae8a1560",
-        "user_id": "7d82a793-c6b4-4b29-b7b7-1114f8c4f625",
-        "role": "owner",
+        "id": "direct:0x16107...:0x2c3dd...:0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+        "conversation_id": "direct:0x1610725056c027d5ae4e2fce73bb925c82c59eaa:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+        "user_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+        "role": "member",
         "joined_at": 1788587857000,
         "last_read_message_id": null,
         "wallet_address": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa"
       },
       {
-        "id": "member-uuid-2",
-        "conversation_id": "a310eec6-82ab-479a-8a3b-8510ae8a1560",
-        "user_id": "85d7d882-590d-4d16-8f5e-57676a6b50ac",
+        "id": "direct:0x16107...:0x2c3dd...:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+        "conversation_id": "direct:0x1610725056c027d5ae4e2fce73bb925c82c59eaa:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+        "user_id": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
         "role": "member",
         "joined_at": 1788587857000,
         "last_read_message_id": null,
@@ -259,17 +259,19 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   {
     "conversations": [
       {
-        "id": "a310eec6-82ab-479a-8a3b-8510ae8a1560",
+        "id": "direct:0x1610725056c027d5ae4e2fce73bb925c82c59eaa:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
         "type": "direct",
+        "owner_address": null,
         "name": null,
         "created_at": 1788587857000,
         "updated_at": 1788587860000,
-        "role": "owner",
+        "role": "member",
         "member_count": 2
       },
       {
-        "id": "d6f3813f-44b3-481b-b2d5-1dd5153c8b69",
+        "id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa:buidlers",
         "type": "group",
+        "owner_address": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
         "name": "Web3 BUIDLers DAO",
         "created_at": 1788587860000,
         "updated_at": 1788587865000,
@@ -289,11 +291,13 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 
 ---
 
-## 5. 模块三：群聊管理与 RBAC 权限 (Groups)
+## 5. 模块三：主权群聊管理 (Sovereign Groups)
 
-角色模型：`owner` (创建者/群主) > `admin` (管理员) > `member` (普通群成员)。
+系统采用 **Web3 自主权群组（Sovereign Groups）** 架构：
+- **群 ID 规范**：格式为 `${owner_address}:${slug}`（例如 `0xa284...:buidlers`）。群 ID 与创建者钱包地址永久强绑定。
+- **单主权管理模型**：一个群永久属于创建者（`owner`），**群主不可移交**。只有群主有权修改群名、邀请成员、移除成员；其他成员仅有权在群内发言及主动退群。这保证了跨节点合并数据时永远不会发生权限冲突。
 
-### 5.1 创建群聊
+### 5.1 创建主权群聊
 
 - **接口路径**：`POST WORKER_BASE_URL/groups`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
@@ -302,20 +306,21 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   {
     "name": "Web3 BUIDLers DAO",
     "member_ids": [
-      "85d7d882-590d-4d16-8f5e-57676a6b50ac",
-      "cd218012-0faf-44aa-849a-38e174639ff7"
-    ]
+      "0x3162ad998c5df9376b6700f379816dc71c9ebf28",
+      "0x10b0da00e5319fbcf1e494de53874c8a23aecb55"
+    ],
+    "slug": "buidlers" // 可选自定义标识符，默认由后端自动生成 8 位随机 hex
   }
   ```
 
-  - `member_ids`：可选的初始成员 UUID 列表。创建者默认加入并拥有 `owner` 角色。
-- **成功响应 (`HTTP 201`)**：返回新建群会话详情（包含 `members` 列表）。
+  - `member_ids`：可选的初始成员钱包地址列表。创建者默认加入并拥有不可转让的 `owner` 角色。
+- **成功响应 (`HTTP 201`)**：返回新建群会话详情，ID 为 `0xcreatorAddress:slug`。
 
 ### 5.2 修改群聊名称
 
 - **接口路径**：`PATCH WORKER_BASE_URL/groups/:id`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
-- **权限要求**：仅 `owner` 或 `admin` 有权修改，普通 `member` 调用返回 `HTTP 403`。
+- **权限要求**：**仅群主（`owner`）有权修改**，其他成员调用直接返回 `HTTP 403`。
 - **请求体 (Content-Type: application/json)**：
   ```json
   {
@@ -328,23 +333,20 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 
 - **接口路径**：`POST WORKER_BASE_URL/groups/:id/members`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
-- **权限要求**：仅 `owner` 或 `admin` 有权邀请新成员。
+- **权限要求**：**仅群主（`owner`）有权邀请新成员**。
 - **请求体 (Content-Type: application/json)**：
-  支持通过 `user_id` 或 `wallet_address`：
+  支持通过 `wallet_address` 或 `user_id`（均统一为小写 0x 地址）：
   ```json
   {
-    "wallet_address": "0x41a0706a3636ce383a69054f52b46ac980743a1d",
-    "role": "member"
+    "wallet_address": "0x41a0706a3636ce383a69054f52b46ac980743a1d"
   }
   ```
-
-  - `role` 可选值为 `"admin"` 或 `"member"`，默认 `"member"`。
 - **成功响应 (`HTTP 201`)**：
   ```json
   {
-    "id": "cm-uuid-new",
-    "conversation_id": "d6f3813f-44b3-481b-b2d5-1dd5153c8b69",
-    "user_id": "cd218012-0faf-44aa-849a-38e174639ff7",
+    "id": "0xowner...:buidlers:0x41a0...",
+    "conversation_id": "0xowner...:buidlers",
+    "user_id": "0x41a0706a3636ce383a69054f52b46ac980743a1d",
     "role": "member",
     "joined_at": 1788587865000,
     "last_read_message_id": null
@@ -356,13 +358,14 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 - **接口路径**：`DELETE WORKER_BASE_URL/groups/:id/members/:userId`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
 - **权限逻辑**：
-  - 群成员主动退群：当 `:userId` 为当前登录用户本人时，允许自主退出。
-  - 踢人：当前用户角色必须为 `owner` 或 `admin`。
-  - 不能踢出群主 (`owner`)。
+  - **普通成员主动退群**：当 `:userId` 为当前登录用户本人时，成功退出并从成员名单移除。
+  - **群主踢人**：群主（`owner`）可移除任何成员。
+  - **群主退出**：因为群所有权不可移交，群主退群将触发**解散并删除整个群会话**。
 - **成功响应 (`HTTP 200`)**：
   ```json
   {
-    "success": true
+    "success": true,
+    "message": "Left group successfully"
   }
   ```
 
@@ -394,8 +397,8 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   ```json
   {
     "id": "36037617-81d9-4226-aecc-317d53dabd7a",
-    "conversation_id": "a310eec6-82ab-479a-8a3b-8510ae8a1560",
-    "sender_id": "7d82a793-c6b4-4b29-b7b7-1114f8c4f625",
+    "conversation_id": "direct:0x1610725056c027d5ae4e2fce73bb925c82c59eaa:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+    "sender_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
     "type": "text",
     "content": "Hello, Bob! Are you ready for Web3?",
     "retention": "permanent",
@@ -420,8 +423,8 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
     "messages": [
       {
         "id": "36037617-81d9-4226-aecc-317d53dabd7a",
-        "conversation_id": "a310eec6-82ab-479a-8a3b-8510ae8a1560",
-        "sender_id": "7d82a793-c6b4-4b29-b7b7-1114f8c4f625",
+        "conversation_id": "direct:0x1610725056c027d5ae4e2fce73bb925c82c59eaa:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+        "sender_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
         "sender_address": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
         "type": "text",
         "content": "Hello, Bob! Are you ready for Web3?",
@@ -565,8 +568,8 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   ```json
   {
     "message_id": "36037617-81d9-4226-aecc-317d53dabd7a",
-    "conversation_id": "a310eec6-82ab-479a-8a3b-8510ae8a1560",
-    "sender_id": "7d82a793-c6b4-4b29-b7b7-1114f8c4f625",
+    "conversation_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa:buidlers",
+    "sender_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
     "total_recipients": 3,
     "delivered_count": 2,
     "read_count": 1,
@@ -574,21 +577,21 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
     "all_read": false,
     "receipts": [
       {
-        "user_id": "cd218012-0faf-44aa-849a-38e174639ff7",
+        "user_id": "0x41a0706a3636ce383a69054f52b46ac980743a1d",
         "wallet_address": "0x41a0706a3636ce383a69054f52b46ac980743a1d",
         "status": "read",
         "delivered_at": 1788587860000,
         "read_at": 1788587865000
       },
       {
-        "user_id": "85d7d882-590d-4d16-8f5e-57676a6b50ac",
+        "user_id": "0x52b0806a3636ce383a69054f52b46ac980743b2e",
         "wallet_address": "0x52b0806a3636ce383a69054f52b46ac980743b2e",
         "status": "delivered",
         "delivered_at": 1788587862000,
         "read_at": null
       },
       {
-        "user_id": "99e12012-0faf-44aa-849a-38e174639cc1",
+        "user_id": "0x63c0906a3636ce383a69054f52b46ac980743c3f",
         "wallet_address": "0x63c0906a3636ce383a69054f52b46ac980743c3f",
         "status": "pending",
         "delivered_at": null,
@@ -630,8 +633,8 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   {
     "message": {
       "id": "b315c4ec-d41f-48bb-b1dc-9a85f39cce93",
-      "conversation_id": "a310eec6-82ab-479a-8a3b-8510ae8a1560",
-      "sender_id": "7d82a793-c6b4-4b29-b7b7-1114f8c4f625",
+      "conversation_id": "direct:0x1610725056c027d5ae4e2fce73bb925c82c59eaa:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+      "sender_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
       "type": "voice",
       "content": "[Voice: 12.5s]",
       "retention": "permanent",
@@ -661,7 +664,7 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 - **请求体 (Content-Type: application/json)**：
   ```json
   {
-    "conversation_id": "a310eec6-82ab-479a-8a3b-8510ae8a1560",
+    "conversation_id": "direct:0x1610725056c027d5ae4e2fce73bb925c82c59eaa:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
     "duration": 5,
     "mime_type": "audio/webm",
     "audio_base64": "GkXfo59ChoEBQveBAULygQ8...",
@@ -739,8 +742,8 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
     "messages": [
       {
         "id": "msg-1",
-        "conversation_id": "conv-a",
-        "sender_id": "user-bob",
+        "conversation_id": "direct:0x1610725056c027d5ae4e2fce73bb925c82c59eaa:0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+        "sender_id": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
         "sender_address": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
         "type": "text",
         "content": "Hey there!",
@@ -819,7 +822,7 @@ export interface AuthVerifyResponse {
 }
 
 export type ConversationType = "direct" | "group";
-export type MemberRole = "owner" | "admin" | "member";
+export type MemberRole = "owner" | "member";
 
 export interface ConversationMember {
   id: string;
@@ -834,6 +837,7 @@ export interface ConversationMember {
 export interface Conversation {
   id: string;
   type: ConversationType;
+  owner_address?: string | null;
   name: string | null;
   created_at: number;
   updated_at: number;
@@ -1009,10 +1013,10 @@ export class Web3ChatClient {
 
   // ==================== 3. 群聊模块 ====================
 
-  public async createGroup(name: string, memberIds: string[] = []): Promise<Conversation> {
+  public async createGroup(name: string, memberIds: string[] = [], slug?: string): Promise<Conversation> {
     return this.request<Conversation>("/groups", {
       method: "POST",
-      body: JSON.stringify({ name, member_ids: memberIds }),
+      body: JSON.stringify({ name, member_ids: memberIds, slug }),
     });
   }
 
@@ -1023,10 +1027,10 @@ export class Web3ChatClient {
     });
   }
 
-  public async addGroupMember(groupId: string, targetAddressOrId: string, role: "admin" | "member" = "member") {
+  public async addGroupMember(groupId: string, targetAddressOrId: string) {
     const payload = targetAddressOrId.startsWith("0x")
-      ? { wallet_address: targetAddressOrId, role }
-      : { user_id: targetAddressOrId, role };
+      ? { wallet_address: targetAddressOrId }
+      : { user_id: targetAddressOrId };
     return this.request(`/groups/${groupId}/members`, {
       method: "POST",
       body: JSON.stringify(payload),

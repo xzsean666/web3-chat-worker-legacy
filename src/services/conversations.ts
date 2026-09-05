@@ -1,3 +1,4 @@
+import { isAddress } from 'viem';
 import type { ConversationRow, ConversationMemberRow, UserRow } from '../db/schema';
 import { normalizeAddress } from '../db';
 
@@ -7,15 +8,41 @@ export interface ConversationMemberWithUser extends ConversationMemberRow {
 
 export interface ConversationDetail extends ConversationRow {
   members: ConversationMemberWithUser[];
-  my_role?: 'owner' | 'admin' | 'member';
+  my_role?: 'owner' | 'member';
 }
 
-async function findUserByIdOrAddress(db: D1Database, identifier: string): Promise<UserRow | null> {
-  if (identifier.startsWith('0x')) {
-    const addr = normalizeAddress(identifier);
-    return db.prepare('SELECT * FROM users WHERE wallet_address = ?').bind(addr).first<UserRow>();
+export async function findOrCreateUser(db: D1Database, identifier: string): Promise<UserRow> {
+  const addr = normalizeAddress(identifier);
+  if (isAddress(addr)) {
+    let user = await db.prepare(
+      'SELECT * FROM users WHERE wallet_address = ? OR id = ?'
+    ).bind(addr, addr).first<UserRow>();
+
+    if (!user) {
+      const now = Date.now();
+      await db.prepare(
+        'INSERT OR IGNORE INTO users (id, wallet_address, created_at, updated_at) VALUES (?, ?, ?, ?)'
+      ).bind(addr, addr, now, now).run();
+      user = {
+        id: addr,
+        wallet_address: addr,
+        created_at: now,
+        updated_at: now,
+      };
+    } else {
+      user.id = user.wallet_address;
+    }
+    return user;
   }
-  return db.prepare('SELECT * FROM users WHERE id = ?').bind(identifier).first<UserRow>();
+
+  const user = await db.prepare(
+    'SELECT * FROM users WHERE id = ? OR wallet_address = ?'
+  ).bind(identifier, identifier).first<UserRow>();
+
+  if (!user) {
+    throw new Error(`Target user not found: ${identifier}`);
+  }
+  return user;
 }
 
 export async function getOrCreateDirectConversation(
@@ -23,44 +50,38 @@ export async function getOrCreateDirectConversation(
   currentUserId: string,
   targetIdentifier: string
 ): Promise<ConversationDetail> {
-  const targetUser = await findUserByIdOrAddress(db, targetIdentifier);
-  if (!targetUser) {
-    throw new Error('Target user not found');
-  }
+  const targetUser = await findOrCreateUser(db, targetIdentifier);
 
   if (targetUser.id === currentUserId) {
     throw new Error('Cannot create direct conversation with yourself');
   }
 
-  // Check if direct conversation already exists
-  const existingConv = await db.prepare(`
-    SELECT c.id, c.type, c.name, c.created_at, c.updated_at
-    FROM conversations c
-    JOIN conversation_members cm1 ON cm1.conversation_id = c.id AND cm1.user_id = ?
-    JOIN conversation_members cm2 ON cm2.conversation_id = c.id AND cm2.user_id = ?
-    WHERE c.type = 'direct'
-    LIMIT 1
-  `).bind(currentUserId, targetUser.id).first<ConversationRow>();
+  // Deterministic Direct Conversation ID: direct:min:max
+  const [userA, userB] = [currentUserId, targetUser.id].sort();
+  const convId = `direct:${userA}:${userB}`;
+
+  const existingConv = await db.prepare(
+    'SELECT * FROM conversations WHERE id = ?'
+  ).bind(convId).first<ConversationRow>();
 
   if (existingConv) {
-    return getConversation(db, existingConv.id, currentUserId);
+    return getConversation(db, convId, currentUserId);
   }
 
-  // Create new direct conversation
-  const convId = crypto.randomUUID();
+  // Create new deterministic direct conversation
   const now = Date.now();
 
   await db.prepare(
-    'INSERT INTO conversations (id, type, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(convId, 'direct', null, now, now).run();
+    'INSERT INTO conversations (id, type, owner_address, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).bind(convId, 'direct', null, null, now, now).run();
 
   await db.prepare(
-    'INSERT INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(crypto.randomUUID(), convId, currentUserId, 'owner', now).run();
+    'INSERT OR IGNORE INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
+  ).bind(`${convId}:${currentUserId}`, convId, currentUserId, 'member', now).run();
 
   await db.prepare(
-    'INSERT INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(crypto.randomUUID(), convId, targetUser.id, 'member', now).run();
+    'INSERT OR IGNORE INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
+  ).bind(`${convId}:${targetUser.id}`, convId, targetUser.id, 'member', now).run();
 
   return getConversation(db, convId, currentUserId);
 }
@@ -71,7 +92,7 @@ export async function listUserConversations(
 ): Promise<Array<ConversationRow & { role: string; member_count: number }>> {
   const query = `
     SELECT
-      c.id, c.type, c.name, c.created_at, c.updated_at,
+      c.id, c.type, c.owner_address, c.name, c.created_at, c.updated_at,
       my_cm.role,
       (SELECT COUNT(*) FROM conversation_members WHERE conversation_id = c.id) AS member_count
     FROM conversations c
@@ -90,7 +111,7 @@ export async function getConversation(
 ): Promise<ConversationDetail> {
   const membership = await db.prepare(
     'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
-  ).bind(conversationId, userId).first<{ role: 'owner' | 'admin' | 'member' }>();
+  ).bind(conversationId, userId).first<{ role: 'owner' | 'member' }>();
 
   if (!membership) {
     throw new Error('Unauthorized: you are not a member of this conversation');
@@ -125,36 +146,50 @@ export async function createGroup(
   db: D1Database,
   creatorId: string,
   name: string,
-  memberIdentifiers: string[] = []
+  memberIdentifiers: string[] = [],
+  slug?: string
 ): Promise<ConversationDetail> {
   const trimmedName = name.trim();
   if (!trimmedName) {
     throw new Error('Group name cannot be empty');
   }
 
-  const convId = crypto.randomUUID();
+  const creator = await findOrCreateUser(db, creatorId);
   const now = Date.now();
 
+  // Sovereign Group ID: ${owner_address}:${slug}
+  const cleanSlug = (slug ? slug.trim().replace(/[^a-zA-Z0-9_-]/g, '') : '') || crypto.randomUUID().replace(/-/g, '').slice(0, 8);
+  let convId = `${creator.id}:${cleanSlug}`;
+
+  const existing = await db.prepare('SELECT id FROM conversations WHERE id = ?').bind(convId).first();
+  if (existing) {
+    convId = `${creator.id}:${cleanSlug}-${crypto.randomUUID().replace(/-/g, '').slice(0, 4)}`;
+  }
+
   await db.prepare(
-    'INSERT INTO conversations (id, type, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(convId, 'group', trimmedName, now, now).run();
+    'INSERT INTO conversations (id, type, owner_address, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).bind(convId, 'group', creator.id, trimmedName, now, now).run();
 
   await db.prepare(
     'INSERT INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(crypto.randomUUID(), convId, creatorId, 'owner', now).run();
+  ).bind(`${convId}:${creator.id}`, convId, creator.id, 'owner', now).run();
 
-  const seenUsers = new Set<string>([creatorId]);
+  const seenUsers = new Set<string>([creator.id]);
   for (const identifier of memberIdentifiers) {
-    const user = await findUserByIdOrAddress(db, identifier);
-    if (user && !seenUsers.has(user.id)) {
-      seenUsers.add(user.id);
-      await db.prepare(
-        'INSERT INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-      ).bind(crypto.randomUUID(), convId, user.id, 'member', now).run();
+    try {
+      const user = await findOrCreateUser(db, identifier);
+      if (user && !seenUsers.has(user.id)) {
+        seenUsers.add(user.id);
+        await db.prepare(
+          'INSERT OR IGNORE INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
+        ).bind(`${convId}:${user.id}`, convId, user.id, 'member', now).run();
+      }
+    } catch {
+      // Ignore unknown non-address member identifiers gracefully
     }
   }
 
-  return getConversation(db, convId, creatorId);
+  return getConversation(db, convId, creator.id);
 }
 
 export async function updateGroupName(
@@ -176,12 +211,8 @@ export async function updateGroupName(
     throw new Error('Cannot update name of direct conversation');
   }
 
-  const membership = await db.prepare(
-    'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
-  ).bind(conversationId, userId).first<{ role: string }>();
-
-  if (!membership || (membership.role !== 'owner' && membership.role !== 'admin')) {
-    throw new Error('Unauthorized: only owner or admin can rename the group');
+  if (conv.owner_address !== userId) {
+    throw new Error('Unauthorized: only the group owner can rename the group');
   }
 
   const now = Date.now();
@@ -200,26 +231,18 @@ export async function addGroupMember(
   db: D1Database,
   conversationId: string,
   requestingUserId: string,
-  targetIdentifier: string,
-  role: 'admin' | 'member' = 'member'
+  targetIdentifier: string
 ): Promise<ConversationMemberWithUser> {
   const conv = await db.prepare('SELECT * FROM conversations WHERE id = ?').bind(conversationId).first<ConversationRow>();
   if (!conv || conv.type !== 'group') {
     throw new Error('Group not found');
   }
 
-  const requester = await db.prepare(
-    'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
-  ).bind(conversationId, requestingUserId).first<{ role: string }>();
-
-  if (!requester || (requester.role !== 'owner' && requester.role !== 'admin')) {
-    throw new Error('Unauthorized: only owner or admin can add members');
+  if (conv.owner_address !== requestingUserId) {
+    throw new Error('Unauthorized: only the group owner can add members');
   }
 
-  const targetUser = await findUserByIdOrAddress(db, targetIdentifier);
-  if (!targetUser) {
-    throw new Error('Target user not found');
-  }
+  const targetUser = await findOrCreateUser(db, targetIdentifier);
 
   const existingMember = await db.prepare(
     'SELECT id FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
@@ -229,12 +252,12 @@ export async function addGroupMember(
     throw new Error('User is already a member of this group');
   }
 
-  const memberId = crypto.randomUUID();
+  const memberId = `${conversationId}:${targetUser.id}`;
   const now = Date.now();
 
   await db.prepare(
     'INSERT INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(memberId, conversationId, targetUser.id, role, now).run();
+  ).bind(memberId, conversationId, targetUser.id, 'member', now).run();
 
   await db.prepare(
     'UPDATE conversations SET updated_at = ? WHERE id = ?'
@@ -244,7 +267,7 @@ export async function addGroupMember(
     id: memberId,
     conversation_id: conversationId,
     user_id: targetUser.id,
-    role,
+    role: 'member',
     joined_at: now,
     last_read_message_id: null,
     wallet_address: targetUser.wallet_address,
@@ -281,30 +304,15 @@ export async function removeGroupMember(
   const isSelf = requestingUserId === targetUserId;
 
   if (isSelf) {
-    if (target.role === 'owner') {
-      // Find another admin or member to promote to owner
-      const nextOwner = await db.prepare(`
-        SELECT id, user_id, role FROM conversation_members
-        WHERE conversation_id = ? AND user_id != ?
-        ORDER BY CASE WHEN role = 'admin' THEN 1 ELSE 2 END, joined_at ASC
-        LIMIT 1
-      `).bind(conversationId, targetUserId).first<{ id: string; user_id: string; role: string }>();
-
-      if (nextOwner) {
-        await db.prepare('UPDATE conversation_members SET role = ? WHERE id = ?').bind('owner', nextOwner.id).run();
-      } else {
-        // No other members left, delete the group conversation
-        await db.prepare('DELETE FROM conversations WHERE id = ?').bind(conversationId).run();
-        return { success: true, message: 'Group deleted as last owner left' };
-      }
+    if (conv.owner_address === requestingUserId) {
+      // Owner leaves: sovereign group is deleted, ownership cannot be transferred!
+      await db.prepare('DELETE FROM conversations WHERE id = ?').bind(conversationId).run();
+      return { success: true, message: 'Group deleted as owner left' };
     }
   } else {
-    // Kicking another user
-    if (requester.role === 'member') {
-      throw new Error('Unauthorized: regular members cannot remove others');
-    }
-    if (requester.role === 'admin' && (target.role === 'owner' || target.role === 'admin')) {
-      throw new Error('Unauthorized: admins cannot remove owners or other admins');
+    // Kicking another member: ONLY the owner can kick!
+    if (conv.owner_address !== requestingUserId) {
+      throw new Error('Unauthorized: only the group owner can remove members');
     }
   }
 

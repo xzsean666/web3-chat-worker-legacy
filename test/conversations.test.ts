@@ -207,7 +207,7 @@ describe('Conversation & Group Management', () => {
       expect(updated.name).toBe('New Brand Name');
     });
 
-    it('allows owner and admin to manage members, and members to leave', async () => {
+    it('allows only owner to manage members, forbids non-owners, and allows members to leave', async () => {
       const createRes = await app.request('/groups', {
         method: 'POST',
         headers: {
@@ -217,28 +217,40 @@ describe('Conversation & Group Management', () => {
         body: JSON.stringify({ name: 'Devs' }),
       }, env);
       const group = (await createRes.json()) as any;
+      expect(group.id).toMatch(new RegExp('^' + aliceUser.id + ':'));
 
-      // Alice adds Bob as admin
+      // Alice (owner) adds Bob
       const addBobRes = await app.request(`/groups/${group.id}/members`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${aliceToken}`,
         },
-        body: JSON.stringify({ user_id: bobUser.id, role: 'admin' }),
+        body: JSON.stringify({ user_id: bobUser.id }),
       }, env);
       expect(addBobRes.status).toBe(201);
 
-      // Bob (admin) adds Charlie as member
-      const addCharlieRes = await app.request(`/groups/${group.id}/members`, {
+      // Bob (member) attempts to add Charlie -> 403 Forbidden
+      const addCharlieByBob = await app.request(`/groups/${group.id}/members`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${bobToken}`,
         },
-        body: JSON.stringify({ user_id: charlieUser.id, role: 'member' }),
+        body: JSON.stringify({ user_id: charlieUser.id }),
       }, env);
-      expect(addCharlieRes.status).toBe(201);
+      expect(addCharlieByBob.status).toBe(403);
+
+      // Alice (owner) adds Charlie -> 201
+      const addCharlieByAlice = await app.request(`/groups/${group.id}/members`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${aliceToken}`,
+        },
+        body: JSON.stringify({ user_id: charlieUser.id }),
+      }, env);
+      expect(addCharlieByAlice.status).toBe(201);
 
       // Charlie (regular member) tries to remove Bob -> 403
       const kickRes = await app.request(`/groups/${group.id}/members/${bobUser.id}`, {
@@ -253,6 +265,15 @@ describe('Conversation & Group Management', () => {
         headers: { Authorization: `Bearer ${charlieToken}` },
       }, env);
       expect(leaveRes.status).toBe(200);
+
+      // Alice (owner) leaves -> group is deleted (immutable ownership)
+      const ownerLeaveRes = await app.request(`/groups/${group.id}/members/${aliceUser.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${aliceToken}` },
+      }, env);
+      expect(ownerLeaveRes.status).toBe(200);
+      const ownerLeaveData = (await ownerLeaveRes.json()) as any;
+      expect(ownerLeaveData.message).toContain('deleted as owner left');
     });
   });
 });

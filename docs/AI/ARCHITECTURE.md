@@ -28,7 +28,7 @@
 ## 2. Core Entities & D1 Schema
 
 ### 2.1 `users`
-- `id`: TEXT PRIMARY KEY (UUID / nanoid)
+- `id`: TEXT PRIMARY KEY (normalized lowercased EVM 0x... wallet address)
 - `wallet_address`: TEXT UNIQUE NOT NULL (lowercased 0x... hex address)
 - `created_at`: INTEGER NOT NULL (UNIX timestamp ms)
 - `updated_at`: INTEGER NOT NULL
@@ -42,23 +42,26 @@
 
 ### 2.3 `sessions`
 - `id`: TEXT PRIMARY KEY
-- `user_id`: TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
+- `user_id`: TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE (wallet address)
 - `token_hash`: TEXT NOT NULL UNIQUE (SHA-256 hash of bearer token)
 - `expires_at`: INTEGER NOT NULL
 - `created_at`: INTEGER NOT NULL
 
-### 2.4 `conversations`
+### 2.4 `conversations` (Sovereign Groups & Deterministic Direct Chats)
 - `id`: TEXT PRIMARY KEY
+  - Direct: `direct:min(addrA, addrB):max(addrA, addrB)` (globally deterministic across nodes)
+  - Group: `${owner_address}:${slug_or_salt}` (self-certifying sovereign ID)
 - `type`: TEXT NOT NULL CHECK(type IN ('direct', 'group'))
-- `name`: TEXT (optional for groups)
+- `owner_address`: TEXT (creator EVM wallet address for groups; immutable, cannot be transferred)
+- `name`: TEXT (group name)
 - `created_at`: INTEGER NOT NULL
-- `updated_at`: INTEGER NOT NULL
+- `updated_at`: INTEGER NOT NULL (used for Last-Write-Wins LWW state merging)
 
 ### 2.5 `conversation_members`
-- `id`: TEXT PRIMARY KEY
+- `id`: TEXT PRIMARY KEY (deterministic `${conversation_id}:${user_id}`)
 - `conversation_id`: TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE
-- `user_id`: TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
-- `role`: TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'member'))
+- `user_id`: TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE (EVM wallet address)
+- `role`: TEXT NOT NULL CHECK(role IN ('owner', 'member'))
 - `joined_at`: INTEGER NOT NULL
 - `last_read_message_id`: TEXT
 - UNIQUE(conversation_id, user_id)

@@ -87,23 +87,24 @@ export async function verifySignatureAndLogin(
   // Delete used nonce immediately (single-use)
   await db.prepare('DELETE FROM nonces WHERE id = ?').bind(nonceRow.id).run();
 
-  // Find or create user
+  // Find or create user: Address as User ID
   let user = await db.prepare(
-    'SELECT * FROM users WHERE wallet_address = ?'
-  ).bind(walletAddress).first<UserRow>();
+    'SELECT * FROM users WHERE wallet_address = ? OR id = ?'
+  ).bind(walletAddress, walletAddress).first<UserRow>();
 
   if (!user) {
-    const userId = crypto.randomUUID();
     await db.prepare(
       'INSERT INTO users (id, wallet_address, created_at, updated_at) VALUES (?, ?, ?, ?)'
-    ).bind(userId, walletAddress, now, now).run();
+    ).bind(walletAddress, walletAddress, now, now).run();
 
     user = {
-      id: userId,
+      id: walletAddress,
       wallet_address: walletAddress,
       created_at: now,
       updated_at: now,
     };
+  } else {
+    user.id = user.wallet_address;
   }
 
   // Create session
@@ -169,13 +170,13 @@ export async function validateSession(
   return {
     session: {
       id: row.session_id,
-      user_id: row.user_id,
+      user_id: row.wallet_address,
       token_hash: row.token_hash,
       expires_at: row.session_expires_at,
       created_at: row.session_created_at,
     },
     user: {
-      id: row.user_id,
+      id: row.wallet_address,
       wallet_address: row.wallet_address,
       created_at: row.user_created_at,
       updated_at: row.user_updated_at,

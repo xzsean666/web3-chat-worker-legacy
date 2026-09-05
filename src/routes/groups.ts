@@ -15,6 +15,7 @@ groupRoutes.use('*', authMiddleware);
 interface CreateGroupBody {
   name?: string;
   member_ids?: string[];
+  slug?: string;
 }
 
 interface UpdateGroupBody {
@@ -24,7 +25,7 @@ interface UpdateGroupBody {
 interface AddMemberBody {
   user_id?: string;
   wallet_address?: string;
-  role?: 'admin' | 'member';
+  role?: 'member';
 }
 
 groupRoutes.post('/', async (c) => {
@@ -35,7 +36,7 @@ groupRoutes.post('/', async (c) => {
       return c.json({ error: 'Group name is required' }, 400);
     }
 
-    const group = await createGroup(c.env.DB, user.id, body.name, body.member_ids ?? []);
+    const group = await createGroup(c.env.DB, user.id, body.name, body.member_ids ?? [], body.slug);
     return c.json(group, 201);
   } catch (err: any) {
     return c.json({ error: err.message }, 400);
@@ -70,7 +71,7 @@ groupRoutes.post('/:id/members', async (c) => {
       return c.json({ error: 'user_id or wallet_address is required' }, 400);
     }
 
-    const member = await addGroupMember(c.env.DB, groupId, user.id, target, body.role || 'member');
+    const member = await addGroupMember(c.env.DB, groupId, user.id, target);
     return c.json(member, 201);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : 400;

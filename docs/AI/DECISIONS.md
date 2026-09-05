@@ -40,3 +40,14 @@
   4. Expose `GET /messages/:id/receipts` endpoint for conversation members to inspect delivery & read status of each recipient.
   5. Decouple server-side ephemeral transit/destruction from client-side local sovereign storage (IndexedDB/SQLite).
 - **Consequences**: Accurate delivery tracking for senders, zero premature message destruction for group members, and full adherence to Web3 local-first sovereign data principles.
+
+## ADR-007: Sovereign Groups & Deterministic Identity Architecture
+- **Status**: Accepted
+- **Context**: In multi-node deployments or when migrating/merging state between independent Worker nodes, traditional surrogate UUIDs create identifier collisions and distributed split-brain conflicts (e.g. concurrent owner transfers or group renames).
+- **Decision**:
+  1. **Address as User ID**: Use normalized EVM wallet address (`0x...`) directly as the user identifier, eliminating stateful mapping synchronization.
+  2. **Deterministic Direct Conversations**: Direct conversation IDs are globally fixed as `direct:min(addrA, addrB):max(addrA, addrB)`.
+  3. **Self-Certifying Sovereign Group IDs**: Group IDs are bound to creator address `${owner_address}:${slug_or_salt}`.
+  4. **Immutable Ownership & Single Authority**: A group permanently belongs to its creator. Ownership cannot be transferred. Only the owner can rename the group or add/remove members. If the owner leaves, the group is dismissed.
+  5. **Conflict-Free State Merging**: Conversations support Last-Write-Wins (LWW) merging on `updated_at`, and members support idempotent `INSERT OR IGNORE` merging without duplicate rows.
+- **Consequences**: Workers become stateless, plug-and-play transit nodes. Groups and users can be merged across multiple Cloudflare Worker D1 instances without coordination or lock contention.

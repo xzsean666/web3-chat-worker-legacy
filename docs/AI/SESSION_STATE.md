@@ -4,7 +4,7 @@
 Build a high-performance, single-node Cloudflare Worker Web3 Chat MVP supporting EVM wallet signature login, direct/group chat, text and voice messaging, explicit delivery ACK, burn-on-read, voice destruction (R2), and incremental sync.
 
 ## Current Task
-TASK-010: Group Chat 1:N Delivery Rollup, Burn-on-Read Synchronization & Message Receipts API
+TASK-011: Sovereign Groups, Address-as-User-ID & Conflict-Free State Merging
 
 ## Current Status
 DONE
@@ -15,7 +15,7 @@ DONE
 - Documented project goal in `docs/AI/GOAL.md`.
 - Defined architecture, D1 schema, and incremental sync protocols in `docs/AI/ARCHITECTURE.md`.
 - Recorded architectural decisions in `docs/AI/DECISIONS.md`.
-- Outlined task breakdown in `docs/AI/TASK_INDEX.md` and detailed specs in `docs/AI/tasks/TASK-001.md` through `TASK-009.md`.
+- Outlined task breakdown in `docs/AI/TASK_INDEX.md` and detailed specs in `docs/AI/tasks/TASK-001.md` through `TASK-011.md`.
 - Initialized `package.json`, configured `pnpm`, installed `hono`, `viem`, `wrangler`, `vitest`, and `@cloudflare/workers-types`.
 - Configured `tsconfig.json` for Cloudflare Worker runtime.
 - Configured `wrangler.jsonc` with D1 `DB` binding, R2 `VOICE_BUCKET` binding, and scheduled cron triggers.
@@ -55,6 +55,17 @@ DONE
 - TASK-010: Implemented `GET /messages/:id/receipts` and `getMessageReceipts` returning detailed per-member delivery and read status.
 - TASK-010: Added tests in `test/receipts.test.ts`, updated `test/e2e.test.ts` and `scripts/live-e2e.ts`.
 - TASK-010: Documented ADR-006, updated ARCHITECTURE.md, README.md, and FRONTEND_INTEGRATION.md with Local-First storage notes.
+- TASK-011: Created `migrations/0002_sovereign_groups.sql` adding `owner_address` column and index on `conversations`.
+- TASK-011: Refactored `src/services/auth.ts` to use normalized lowercased EVM wallet address (`0x...`) directly as `user.id`.
+- TASK-011: Refactored `src/services/conversations.ts` for deterministic direct conversation IDs (`direct:min:max`), self-certifying sovereign group IDs (`${owner_address}:${slug}`), and strict immutable single-owner RBAC (owner-only rename/add/kick, owner leaving deletes group).
+- TASK-011: Updated `src/routes/groups.ts` to support optional custom `slug` parameter.
+- TASK-011: Updated test runner in `test/helpers/db.ts` to automatically apply all migrations in order.
+- TASK-011: Updated `test/conversations.test.ts` to test owner-only group management permissions and auto-deletion on owner departure.
+- TASK-011: Created `docs/CLOUDFLARE_DATA_MERGE.md` with complete SOP for multi-node conflict-free state merging.
+- TASK-011: Added ADR-007 to `docs/AI/DECISIONS.md`, updated `docs/AI/ARCHITECTURE.md`, `README.md`, and `docs/FRONTEND_INTEGRATION.md`.
+- TASK-011: Applied remote migration `0002_sovereign_groups.sql` to Cloudflare D1.
+- TASK-011: Deployed to Cloudflare Worker and verified with `pnpm run test:live` (10/10 live steps passed).
+- TASK-011: Completely purged remote D1 tables (`users`, `conversations`, `messages`, `sessions`, etc.) to clear legacy UUID schema data and eliminate foreign key conflicts for clean frontend onboarding.
 
 ## Modified Files
 - `package.json`
@@ -80,6 +91,7 @@ DONE
 - `src/routes/sync.ts`
 - `src/routes/voice.ts`
 - `migrations/0001_initial_schema.sql`
+- `migrations/0002_sovereign_groups.sql`
 - `test/helpers/db.ts`
 - `test/helpers/wallet.ts`
 - `test/helpers/r2.ts`
@@ -94,32 +106,33 @@ DONE
 - `test/e2e.test.ts`
 - `README.md`
 - `scripts/live-e2e.ts`
+- `docs/CLOUDFLARE_DATA_MERGE.md`
 - `docs/FRONTEND_INTEGRATION.md`
 - `docs/AI/TASK_INDEX.md`
 - `docs/AI/DECISIONS.md`
 - `docs/AI/ARCHITECTURE.md`
-- `docs/AI/tasks/TASK-001.md` through `TASK-010.md`
+- `docs/AI/tasks/TASK-001.md` through `TASK-011.md`
 - `docs/AI/SESSION_STATE.md`
 
 ## Verification Commands & Results
 - `pnpm run typecheck`: Success (zero type errors across all source and test files).
 - `pnpm test`: Success (43/43 tests passing across 9 test suites with 100% pass rate).
-- `wrangler d1 execute web3_chat_db --remote --file=./migrations/0001_initial_schema.sql`: Success (21 queries executed).
-- `pnpm run deploy`: Success (deployed to Cloudflare Worker).
-- `pnpm run test:live`: Success (10/10 live E2E steps passed against custom domain without proxy/VPN).
-- `docs/FRONTEND_INTEGRATION.md`: Created comprehensive frontend integration guide with receipts and Local-First storage details.
+- `pnpm wrangler d1 migrations apply web3_chat_db --remote`: Success (applied `0001_initial_schema.sql` and `0002_sovereign_groups.sql`).
+- `pnpm run deploy`: Success (deployed version `cc1970b8-61b9-4a9d-a990-333066e4f4da` to Cloudflare Worker).
+- `pnpm run test:live`: Success (10/10 live E2E steps passed against deployed Worker).
 
 ## Unresolved Issues
 None.
 
 ## Risks and Assumptions
-- Frontend clients should configure `WORKER_BASE_URL` via environment variables.
+- Frontend clients should format group IDs as `${owner_address}:${slug}`.
 
 ## Next Task
-Frontend integration & client implementation.
+Frontend integration & client SDK release.
 
 ## Next Session Read Files
 - `README.md`
+- `docs/CLOUDFLARE_DATA_MERGE.md`
 - `docs/FRONTEND_INTEGRATION.md`
 - `docs/AI/GOAL.md`
 - `docs/AI/SESSION_STATE.md`

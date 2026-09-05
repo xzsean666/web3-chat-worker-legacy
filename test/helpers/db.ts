@@ -126,9 +126,12 @@ export class MockD1Database {
 export function createMockD1Database(applyMigrations = true): D1Database {
   const db = new MockD1Database();
   if (applyMigrations) {
-    const migrationPath = path.resolve(__dirname, '../../migrations/0001_initial_schema.sql');
-    const sql = fs.readFileSync(migrationPath, 'utf-8');
-    db.rawDb.exec(sql);
+    const migrationsDir = path.resolve(__dirname, '../../migrations');
+    const migrationFiles = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
+    for (const file of migrationFiles) {
+      const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
+      db.rawDb.exec(sql);
+    }
   }
   return db as unknown as D1Database;
 }

@@ -9,7 +9,7 @@ export type User = UserRow;
 export type Session = SessionRow;
 
 export type ConversationType = 'direct' | 'group';
-export type MemberRole = 'owner' | 'admin' | 'member';
+export type MemberRole = 'owner' | 'member';
 export type MessageType = 'text' | 'voice';
 export type RetentionType = 'permanent' | 'on_read';
 export type MessageStatus = 'pending' | 'delivered' | 'read';
