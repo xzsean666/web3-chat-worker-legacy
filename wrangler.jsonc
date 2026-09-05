@@ -1,0 +1,28 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "web3-chat-worker",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-02-24",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "web3_chat_db",
+			"database_id": "be256d56-fc91-4e57-a57c-a0808238e617",
+			"migrations_dir": "migrations"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "VOICE_BUCKET",
+			"bucket_name": "web3-chat-voice"
+		}
+	],
+	"triggers": {
+		"crons": [
+			"* * * * *"
+		]
+	}
+}

@@ -1,0 +1,25 @@
+{
+  "name": "web3-chat-worker",
+  "version": "0.1.0",
+  "description": "Cloudflare Worker Web3 Chat MVP with EVM login, D1 SQLite, R2 voice storage, and ephemeral burn-on-read messaging",
+  "main": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:live": "NODE_USE_ENV_PROXY=1 node --experimental-strip-types scripts/live-e2e.ts"
+  },
+  "dependencies": {
+    "hono": "^4.7.2",
+    "viem": "^2.23.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250224.0",
+    "@types/node": "^26.4.1",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.7",
+    "wrangler": "^4.31.0"
+  }
+}
