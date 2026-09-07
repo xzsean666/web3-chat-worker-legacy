@@ -173,6 +173,18 @@ describe('Voice Message Storage (R2) & Synchronized Cleanup', () => {
     const readData = (await readRes.json()) as any;
     expect(readData.status).toBe('burned');
 
+    // Bob can still stream audio within 30s viewing window
+    const listenWithin30s = await app.request(`/voice/${msgId}`, {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    expect(listenWithin30s.status).toBe(200);
+
+    // After 30s viewing window elapses, sweeper purges D1 and R2
+    const oldTimestamp = Date.now() - 35000;
+    await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND status = 'read'")
+      .bind(oldTimestamp, msgId).run();
+    await app.request('/admin/cleanup', { method: 'POST' }, env);
+
     // Verify D1 message record is deleted
     const msgInDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msgId).first();
     expect(msgInDb).toBeNull();

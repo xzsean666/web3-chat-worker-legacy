@@ -15,4 +15,8 @@
 | [TASK-011](tasks/TASK-011.md) | Sovereign Groups, Address-as-User-ID & Conflict-Free State Merging | TASK-010 | DONE | Address-as-User-ID, deterministic direct IDs, sovereign group IDs, and multi-node merge SOP |
 | [TASK-012](tasks/TASK-012.md) | Per-Recipient Burn-on-Read & Group Read-State Filtering | TASK-011 | DONE | Per-user burn response, per-user query filtering, voice download guard, and deferred full destruction |
 | [TASK-013](tasks/TASK-013.md) | Image & File Messaging Support with Dual-Storage R2 Upload, Download & Destruction | TASK-012 | DONE | Image & file upload, download, metadata, dual-storage destruction, sweeper cleanup |
+| [TASK-014](tasks/TASK-014.md) | User Dual-Metadata (Public/Private JSON) & Single Avatar Storage (R2) | TASK-013 | DONE | Public & private JSON user metadata, privacy controls, avatar upload, download & single-avatar limit |
+| [TASK-015](tasks/TASK-015.md) | 30-Second Message Recall & 30-Second Burn-on-Read Viewing Window | TASK-014 | DONE | Configurable 30s message recall, R2 media purge on recall, 30s minimum burn-on-read viewing window |
+| [TASK-016](tasks/TASK-016.md) | Social System: Friends List, Friend Tagging & Blacklist Enforcement | TASK-015 | DONE | Friends management, friend tags, blacklist management, 1:1 chat block enforcement, and message mentions |
+
 

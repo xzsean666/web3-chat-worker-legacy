@@ -19,6 +19,7 @@ imageRoutes.post('/upload', async (c) => {
     let height: number | undefined;
     let retention: 'permanent' | 'on_read' = 'permanent';
     let expiresInSeconds: number | undefined;
+    let burnAfterSeconds: number | undefined;
     let imageData: Uint8Array;
     let mimeType = 'image/png';
 
@@ -36,6 +37,9 @@ imageRoutes.post('/upload', async (c) => {
       }
       if (body['expires_in_seconds']) {
         expiresInSeconds = parseInt(body['expires_in_seconds'] as string, 10);
+      }
+      if (body['burn_after_seconds']) {
+        burnAfterSeconds = parseInt(body['burn_after_seconds'] as string, 10);
       }
 
       const file = body['file'] || body['image'];
@@ -58,6 +62,7 @@ imageRoutes.post('/upload', async (c) => {
       height = json.height !== undefined ? Number(json.height) : undefined;
       retention = json.retention || 'permanent';
       expiresInSeconds = json.expires_in_seconds ? Number(json.expires_in_seconds) : undefined;
+      burnAfterSeconds = json.burn_after_seconds !== undefined ? Number(json.burn_after_seconds) : undefined;
       mimeType = json.mime_type || 'image/png';
 
       if (!json.image_base64) {
@@ -86,6 +91,7 @@ imageRoutes.post('/upload', async (c) => {
       height,
       retention,
       expires_in_seconds: expiresInSeconds,
+      burn_after_seconds: burnAfterSeconds,
     });
 
     return c.json(result, 201);

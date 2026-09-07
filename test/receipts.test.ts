@@ -149,7 +149,19 @@ describe('Explicit Delivery ACK & Burn-on-Read Lifecycle', () => {
     const readData = (await readRes.json()) as any;
     expect(readData.status).toBe('burned');
 
-    // Verify message is gone from D1
+    // Within 30s viewing window, message is still readable by Bob
+    const getWithin30s = await app.request(`/conversations/${conversationId}/messages`, {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    const getDataWithin30s = (await getWithin30s.json()) as any;
+    expect(getDataWithin30s.messages.length).toBe(1);
+
+    // After 30s viewing window elapses, message is burned and purged
+    const oldTimestamp = Date.now() - 35000;
+    await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND status = 'read'")
+      .bind(oldTimestamp, msg.id).run();
+    await app.request('/admin/cleanup', { method: 'POST' }, env);
+
     const inDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msg.id).first();
     expect(inDb).toBeNull();
 
@@ -309,11 +321,22 @@ describe('Explicit Delivery ACK & Burn-on-Read Lifecycle', () => {
     let inDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msg.id).first();
     expect(inDb).not.toBeNull();
 
-    // Bob cannot fetch the read on_read message anymore (filtered out)
-    const bobMessagesRes = await app.request(`/conversations/${group.id}/messages`, {
+    // Bob can still fetch the read on_read message within 30s viewing window
+    let bobMessagesRes = await app.request(`/conversations/${group.id}/messages`, {
       headers: { Authorization: `Bearer ${bobToken}` },
     }, env);
-    const bobMessagesData = (await bobMessagesRes.json()) as any;
+    let bobMessagesData = (await bobMessagesRes.json()) as any;
+    expect(bobMessagesData.messages.some((m: any) => m.id === msg.id)).toBe(true);
+
+    // After 35s (> 30s), Bob cannot fetch the read on_read message anymore (filtered out)
+    const oldReadTime = Date.now() - 35000;
+    await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND user_id = ? AND status = 'read'")
+      .bind(oldReadTime, msg.id, bobUser.id).run();
+
+    bobMessagesRes = await app.request(`/conversations/${group.id}/messages`, {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    bobMessagesData = (await bobMessagesRes.json()) as any;
     expect(bobMessagesData.messages.some((m: any) => m.id === msg.id)).toBe(false);
 
     // Charlie has not read yet, so Charlie CAN still fetch it
@@ -339,6 +362,16 @@ describe('Explicit Delivery ACK & Burn-on-Read Lifecycle', () => {
     expect(charlieReadRes.status).toBe(200);
     const charlieReadData = (await charlieReadRes.json()) as any;
     expect(charlieReadData.status).toBe('burned'); // Burned triggered!
+
+    // Charlie still has 30s viewing window
+    inDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msg.id).first();
+    expect(inDb).not.toBeNull();
+
+    // After 35s (> 30s), both viewing windows elapsed -> sweeper purges from D1
+    const oldReadTime2 = Date.now() - 35000;
+    await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND status = 'read'")
+      .bind(oldReadTime2, msg.id).run();
+    await app.request('/admin/cleanup', { method: 'POST' }, env);
 
     // Message must now be purged from D1
     inDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msg.id).first();
@@ -406,7 +439,18 @@ describe('Explicit Delivery ACK & Burn-on-Read Lifecycle', () => {
     }, env);
     expect((await bobRead.json() as any).status).toBe('burned');
 
-    // Bob syncs after reading -> message is filtered out!
+    // Bob syncs after reading -> within 30s viewing window, message is still returned
+    bobSync = await app.request('/sync', {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    bobSyncData = (await bobSync.json()) as any;
+    expect(bobSyncData.messages.some((m: any) => m.id === msg.id)).toBe(true);
+
+    // After 35s (> 30s), message is filtered out from sync for Bob
+    const oldTimestamp = Date.now() - 35000;
+    await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND user_id = ? AND status = 'read'")
+      .bind(oldTimestamp, msg.id, bobUser.id).run();
+
     bobSync = await app.request('/sync', {
       headers: { Authorization: `Bearer ${bobToken}` },
     }, env);

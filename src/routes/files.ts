@@ -17,6 +17,7 @@ fileRoutes.post('/upload', async (c) => {
     let caption: string | undefined;
     let retention: 'permanent' | 'on_read' = 'permanent';
     let expiresInSeconds: number | undefined;
+    let burnAfterSeconds: number | undefined;
     let fileData: Uint8Array;
     let mimeType = 'application/octet-stream';
 
@@ -28,6 +29,9 @@ fileRoutes.post('/upload', async (c) => {
 
       if (body['expires_in_seconds']) {
         expiresInSeconds = parseInt(body['expires_in_seconds'] as string, 10);
+      }
+      if (body['burn_after_seconds']) {
+        burnAfterSeconds = parseInt(body['burn_after_seconds'] as string, 10);
       }
 
       const file = body['file'];
@@ -48,6 +52,7 @@ fileRoutes.post('/upload', async (c) => {
       caption = json.caption || json.content;
       retention = json.retention || 'permanent';
       expiresInSeconds = json.expires_in_seconds ? Number(json.expires_in_seconds) : undefined;
+      burnAfterSeconds = json.burn_after_seconds !== undefined ? Number(json.burn_after_seconds) : undefined;
       mimeType = json.mime_type || 'application/octet-stream';
 
       if (!json.file_base64) {
@@ -82,6 +87,7 @@ fileRoutes.post('/upload', async (c) => {
       caption,
       retention,
       expires_in_seconds: expiresInSeconds,
+      burn_after_seconds: burnAfterSeconds,
     });
 
     return c.json(result, 201);

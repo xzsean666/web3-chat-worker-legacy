@@ -1,12 +1,15 @@
-import type { UserRow, SessionRow } from './db/schema';
+import type { UserRow, SessionRow, FriendRow, BlacklistRow } from './db/schema';
 
 export interface Env {
   DB: D1Database;
   VOICE_BUCKET: R2Bucket;
+  MESSAGE_RECALL_WINDOW_SECONDS?: string | number;
 }
 
 export type User = UserRow;
 export type Session = SessionRow;
+export type Friend = FriendRow;
+export type Blacklist = BlacklistRow;
 
 export type ConversationType = 'direct' | 'group';
 export type MemberRole = 'owner' | 'member';

@@ -9,6 +9,8 @@ import { syncRoutes } from './routes/sync';
 import { voiceRoutes } from './routes/voice';
 import { imageRoutes } from './routes/images';
 import { fileRoutes } from './routes/files';
+import { userRoutes } from './routes/users';
+import { friendRoutes, blacklistRoutes } from './routes/social';
 import { sweepExpiredMessages } from './services/cleanup';
 
 const app = new Hono<AppEnv>();
@@ -33,6 +35,9 @@ app.post('/admin/cleanup', async (c) => {
 });
 
 app.route('/auth', authRoutes);
+app.route('/users', userRoutes);
+app.route('/friends', friendRoutes);
+app.route('/blacklist', blacklistRoutes);
 app.route('/conversations', conversationRoutes);
 app.route('/groups', groupRoutes);
 app.route('/voice', voiceRoutes);

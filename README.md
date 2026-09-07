@@ -36,13 +36,22 @@ High-performance, single-node Cloudflare Worker backend for ephemeral Web3 chat.
    - HTTP 200 upon message sending is only an API receipt.
    - Message status transitions from `pending` -> `delivered` only when the recipient client explicitly acknowledges receipt (`POST /messages/:id/ack` or batch `/messages/ack`).
    - Senders are strictly prevented from acknowledging delivery or read receipts of their own messages.
-4. **Dual-Storage Synchronized Destruction (Burn-on-Read)**:
-   - When a message with `retention: "on_read"` receives a read acknowledgement (`POST /messages/:id/read`), the backend atomically removes audio binary objects from Cloudflare R2 and deletes the relational row from Cloudflare D1.
-5. **Incremental Sync Engine**:
+4. **Dual-Storage Synchronized Destruction & 30s Burn Window**:
+   - Ephemeral messages (`retention: "on_read"`) allow recipients at least a 30-second viewing window upon reading before filtering out.
+   - Once all recipients have read and their viewing windows elapse, the backend atomically purges binary objects from Cloudflare R2 and relational rows from Cloudflare D1.
+5. **30-Second Message Recall**:
+   - Message senders can recall messages within 30 seconds (`POST /messages/:id/recall`). Media assets in R2 are purged immediately upon recall.
+6. **User Dual-Metadata & Single Avatar in R2**:
+   - Each user maintains `public_metadata` (readable by everyone) and `private_metadata` (readable only by the user). Both are editable solely by the user.
+   - Users can maintain exactly one avatar in R2; uploading a new avatar automatically purges the old one.
+7. **Social Graph: Friends, Tags & Blacklist**:
+   - Friend management with custom aliases and arbitrary tag categorization (`/friends`, `/friends/tags`).
+   - Blacklist enforcement (`/blacklist`) prevents blocked users from initiating 1:1 chats or messaging the blocker with HTTP 403.
+8. **Incremental Sync Engine**:
    - **Cursor Sync (`GET /conversations/:id/messages?after_id=...&limit=...`)**: Fetches ordered delta messages newer than the specified cursor.
    - **Global Sync (`GET /sync?since=...`)**: Single roundtrip retrieval of updates across all joined conversations for battery- and bandwidth-constrained mobile clients.
    - **Batch ACK (`POST /messages/ack`, `POST /messages/read`)**: Allows batch acknowledgement of message IDs.
-6. **Automated Scheduled Sweeper**:
+9. **Automated Scheduled Sweeper**:
    - Cloudflare Worker scheduled cron handler runs every minute (`crons = ["* * * * *"]`) to sweep expired messages and orphan voice binaries.
 
 ---
@@ -337,10 +346,16 @@ Read acknowledgement when the user views the message.
 - **Effect**:
   - For `permanent` messages: Transitions status to `read` (when all recipients have read in groups).
   - For `on_read` messages:
-    - Always responds with `{ "status": "burned" }` so client can trigger immediate burn UI and purge local message state.
-    - Filters out the message in `/conversations/:id/messages` and `/sync` for reading members, and rejects repeat audio downloads (`GET /voice/:id` -> 404).
-    - In **1:1 chats**: Atomically destroys D1 row and R2 audio binary immediately.
-    - In **1:N group chats**: Preserves transit message until **all** group recipients have read (`all_read === true`), then executes atomic dual-storage destruction (or until `expires_at` cron sweeper).
+    - Responds with `{ "status": "burned", "burn_after_seconds": 30 }`.
+    - Reader is guaranteed at least 30 seconds to view/play/download the message before it is excluded from sync/queries and downloads return `404`.
+    - In **1:1 chats**: Atomically destroys D1 row and R2 media binaries once the reading window has elapsed.
+    - In **1:N group chats**: Preserves transit message until **all** group recipients have read and all viewing windows have elapsed, then executes atomic dual-storage destruction.
+
+#### `POST /messages/:id/recall`
+Recall a sent message within 30 seconds of creation.
+- **Access**: Sender only (`HTTP 403` otherwise).
+- **Time Window**: Within 30 seconds (`HTTP 400` if expired).
+- **Effect**: Sets `recalled_at`, masks content to `"This message was recalled"`, and immediately purges any linked voice/image/file binary in Cloudflare R2 and removes media metadata.
 
 #### `GET /messages/:id/receipts`
 Inspect delivery and read progress for each recipient in direct or group chats.
@@ -446,7 +461,71 @@ Retrieve file metadata JSON.
 
 ---
 
-### 7. Scheduled Sweeper & Admin Maintenance
+### 7. User Dual-Metadata & Single Avatar (`/users`)
+
+#### `GET /users/me`
+Retrieve authenticated user profile including `public_metadata` and `private_metadata`.
+
+#### `PATCH /users/me/metadata`
+Update user's `public_metadata` and/or `private_metadata`.
+- **Request Body**:
+  ```json
+  {
+    "public_metadata": { "nickname": "Alice", "bio": "Web3 dev" },
+    "private_metadata": { "theme": "dark" }
+  }
+  ```
+
+#### `POST /users/me/avatar`
+Upload user's single avatar (multipart file or base64 JSON). Any previously uploaded avatar is atomically removed from Cloudflare R2.
+- **Response**: `200 OK` with `{ "success": true, "avatar_url": "...", "avatar_mime": "image/png", "avatar_updated_at": ... }`
+
+#### `GET /users/:address`
+Public profile lookup. Returns `public_metadata` and `avatar_url`. Strictly excludes `private_metadata`.
+
+#### `GET /users/:address/avatar`
+Public stream of user's active avatar image. Returns `404` if user has not uploaded an avatar.
+
+---
+
+### 8. Social Graph & Blacklist (`/friends`, `/blacklist`)
+
+#### `GET /friends` & `GET /friends?tag=crypto`
+List friends, optionally filtered by tag. Includes friend profile, custom `alias`, `tags`, and avatar.
+
+#### `POST /friends`
+Add a friend.
+- **Request Body**: `{ "friend_address": "0xbob...", "alias": "Bob", "tags": ["crypto", "dev"] }`
+
+#### `GET /friends/:address`
+Get friend details and tags.
+
+#### `PATCH /friends/:address`
+Update friend `alias` and/or `tags`.
+
+#### `PUT /friends/:address/tags`
+Replace friend tags array.
+
+#### `GET /friends/tags`
+List all unique tags used across the user's friend list.
+
+#### `DELETE /friends/:address`
+Remove a friend.
+
+#### `GET /blacklist`
+List blocked addresses.
+
+#### `POST /blacklist`
+Block an address with optional reason.
+- **Request Body**: `{ "blocked_address": "0xevil...", "reason": "spam" }`
+- **Enforcement**: Blocked users are prohibited from creating 1:1 direct conversations or sending messages to the blocker (`HTTP 403 Forbidden`).
+
+#### `DELETE /blacklist/:address`
+Unblock an address.
+
+---
+
+### 9. Scheduled Sweeper & Admin Maintenance
 
 #### `POST /admin/cleanup`
 Manually invoke expiration sweeper.

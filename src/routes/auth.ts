@@ -45,7 +45,27 @@ authRoutes.post('/verify', async (c) => {
 
 authRoutes.get('/me', authMiddleware, (c) => {
   const user = c.get('user');
-  return c.json({ user });
+  let public_metadata: Record<string, any> = {};
+  let private_metadata: Record<string, any> = {};
+  try {
+    public_metadata = typeof user.public_metadata === 'string' ? JSON.parse(user.public_metadata) : (user.public_metadata || {});
+  } catch {}
+  try {
+    private_metadata = typeof user.private_metadata === 'string' ? JSON.parse(user.private_metadata) : (user.private_metadata || {});
+  } catch {}
+
+  return c.json({
+    user: {
+      id: user.id,
+      wallet_address: user.wallet_address,
+      public_metadata,
+      private_metadata,
+      avatar_url: user.avatar_key ? `/users/${user.wallet_address}/avatar` : null,
+      avatar_updated_at: user.avatar_updated_at ?? null,
+      created_at: user.created_at,
+      updated_at: user.updated_at,
+    },
+  });
 });
 
 authRoutes.post('/logout', authMiddleware, async (c) => {

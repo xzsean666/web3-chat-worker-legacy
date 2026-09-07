@@ -3,6 +3,11 @@
 export interface UserRow {
   id: string;
   wallet_address: string;
+  public_metadata: string;
+  private_metadata: string;
+  avatar_key: string | null;
+  avatar_mime: string | null;
+  avatar_updated_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -53,6 +58,9 @@ export interface MessageRow {
   delivered_at: number | null;
   read_at: number | null;
   created_at: number;
+  recalled_at?: number | null;
+  burn_after_seconds?: number | null;
+  mentions?: string | null;
 }
 
 export interface MessageReceiptRow {
@@ -94,3 +102,22 @@ export interface FileMessageRow {
   size: number;
   created_at: number;
 }
+
+export interface FriendRow {
+  id: string;
+  user_id: string;
+  friend_address: string;
+  alias: string | null;
+  tags: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface BlacklistRow {
+  id: string;
+  user_id: string;
+  blocked_address: string;
+  reason: string | null;
+  created_at: number;
+}
+

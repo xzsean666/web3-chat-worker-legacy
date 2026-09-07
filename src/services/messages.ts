@@ -1,8 +1,9 @@
 import type { MessageRow, VoiceMessageRow, ImageMessageRow, FileMessageRow } from '../db/schema';
-import { destroyMessage } from './destruction';
+import { destroyMessage, destroyMediaOnly } from './destruction';
 
 export interface MessageWithSender extends MessageRow {
   sender_address: string;
+  is_recalled?: boolean;
   voice?: VoiceMessageRow | null;
   image?: ImageMessageRow | null;
   file?: FileMessageRow | null;
@@ -13,6 +14,8 @@ export interface SendMessageOptions {
   type?: 'text' | 'voice' | 'image' | 'file';
   retention?: 'permanent' | 'on_read';
   expires_in_seconds?: number;
+  burn_after_seconds?: number;
+  mentions?: string[];
 }
 
 export interface GetMessagesOptions {
@@ -59,12 +62,39 @@ export async function sendMessage(
     throw new Error('Unauthorized: you are not a member of this conversation');
   }
 
+  // Check if sender is blocked in direct chat
+  const conv = await db.prepare(
+    'SELECT type FROM conversations WHERE id = ?'
+  ).bind(conversationId).first<{ type: string }>();
+
+  if (conv?.type === 'direct') {
+    const otherMember = await db.prepare(
+      'SELECT user_id FROM conversation_members WHERE conversation_id = ? AND user_id != ?'
+    ).bind(conversationId, senderId).first<{ user_id: string }>();
+
+    if (otherMember) {
+      const isBlocked = await db.prepare(
+        'SELECT 1 FROM blacklist WHERE user_id = ? AND blocked_address = ?'
+      ).bind(otherMember.user_id, senderId).first();
+
+      if (isBlocked) {
+        throw new Error('Cannot send message: you have been blocked by this user');
+      }
+    }
+  }
+
   const type = options.type || 'text';
   if (type === 'text' && (!options.content || !options.content.trim())) {
     throw new Error('Message content cannot be empty for text messages');
   }
 
   const retention = options.retention || 'permanent';
+  const burnAfterSeconds = retention === 'on_read' ? Math.max(30, Number(options.burn_after_seconds) || 30) : null;
+  const mentionsList = Array.isArray(options.mentions)
+    ? options.mentions.map((m) => m.toLowerCase().trim()).filter(Boolean)
+    : [];
+  const mentionsJson = JSON.stringify(mentionsList);
+
   const expiresInMs =
     options.expires_in_seconds && options.expires_in_seconds > 0
       ? options.expires_in_seconds * 1000
@@ -77,9 +107,9 @@ export async function sendMessage(
 
   await db.prepare(`
     INSERT INTO messages (
-      id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-  `).bind(messageId, conversationId, senderId, type, content, retention, expiresAt, now).run();
+      id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds, mentions
+    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+  `).bind(messageId, conversationId, senderId, type, content, retention, expiresAt, now, burnAfterSeconds, mentionsJson).run();
 
   await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId).run();
 
@@ -95,6 +125,9 @@ export async function sendMessage(
     delivered_at: null,
     read_at: null,
     created_at: now,
+    recalled_at: null,
+    burn_after_seconds: burnAfterSeconds,
+    mentions: mentionsJson,
   };
 }
 
@@ -135,13 +168,14 @@ export async function getConversationMessages(
             AND EXISTS (
               SELECT 1 FROM message_receipts mr
               WHERE mr.message_id = m.id AND mr.user_id = ? AND mr.status = 'read'
+                AND (? - mr.timestamp) >= (COALESCE(m.burn_after_seconds, 30) * 1000)
             )
           )
           AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?))
         ORDER BY m.created_at ASC, m.id ASC
         LIMIT ?
       `;
-      params = [conversationId, now, userId, cursorMsg.created_at, cursorMsg.created_at, options.after_id, limit + 1];
+      params = [conversationId, now, userId, now, cursorMsg.created_at, cursorMsg.created_at, options.after_id, limit + 1];
     } else {
       query = `
         SELECT m.*, u.wallet_address AS sender_address
@@ -154,12 +188,13 @@ export async function getConversationMessages(
             AND EXISTS (
               SELECT 1 FROM message_receipts mr
               WHERE mr.message_id = m.id AND mr.user_id = ? AND mr.status = 'read'
+                AND (? - mr.timestamp) >= (COALESCE(m.burn_after_seconds, 30) * 1000)
             )
           )
         ORDER BY m.created_at ASC, m.id ASC
         LIMIT ?
       `;
-      params = [conversationId, now, userId, limit + 1];
+      params = [conversationId, now, userId, now, limit + 1];
     }
   } else {
     query = `
@@ -173,12 +208,13 @@ export async function getConversationMessages(
           AND EXISTS (
             SELECT 1 FROM message_receipts mr
             WHERE mr.message_id = m.id AND mr.user_id = ? AND mr.status = 'read'
+              AND (? - mr.timestamp) >= (COALESCE(m.burn_after_seconds, 30) * 1000)
           )
         )
       ORDER BY m.created_at ASC, m.id ASC
       LIMIT ?
     `;
-    params = [conversationId, now, userId, limit + 1];
+    params = [conversationId, now, userId, now, limit + 1];
   }
 
   const res = await db.prepare(query).bind(...params).all<MessageWithSender>();
@@ -216,13 +252,14 @@ export async function getSyncUpdates(
         AND EXISTS (
           SELECT 1 FROM message_receipts mr
           WHERE mr.message_id = m.id AND mr.user_id = ? AND mr.status = 'read'
+            AND (? - mr.timestamp) >= (COALESCE(m.burn_after_seconds, 30) * 1000)
         )
       )
     ORDER BY m.created_at ASC, m.id ASC
     LIMIT ?
   `;
 
-  const res = await db.prepare(query).bind(userId, now, since, userId, limit + 1).all<MessageWithSender>();
+  const res = await db.prepare(query).bind(userId, now, since, userId, now, limit + 1).all<MessageWithSender>();
   const rows = res.results;
   const has_more = rows.length > limit;
   const messages = has_more ? rows.slice(0, limit) : rows;
@@ -241,9 +278,17 @@ export async function enrichMessagesWithMedia(
 ): Promise<MessageWithSender[]> {
   if (!messages || messages.length === 0) return messages;
 
-  const voiceMsgIds = messages.filter((m) => m.type === 'voice').map((m) => m.id);
-  const imageMsgIds = messages.filter((m) => m.type === 'image').map((m) => m.id);
-  const fileMsgIds = messages.filter((m) => m.type === 'file').map((m) => m.id);
+  for (const m of messages) {
+    if (m.recalled_at) {
+      m.is_recalled = true;
+      m.content = '[Message recalled]';
+    }
+  }
+
+  const activeMessages = messages.filter((m) => !m.recalled_at);
+  const voiceMsgIds = activeMessages.filter((m) => m.type === 'voice').map((m) => m.id);
+  const imageMsgIds = activeMessages.filter((m) => m.type === 'image').map((m) => m.id);
+  const fileMsgIds = activeMessages.filter((m) => m.type === 'file').map((m) => m.id);
 
   if (voiceMsgIds.length === 0 && imageMsgIds.length === 0 && fileMsgIds.length === 0) {
     return messages;
@@ -284,7 +329,11 @@ export async function enrichMessagesWithMedia(
   }
 
   for (const m of messages) {
-    if (m.type === 'voice') {
+    if (m.recalled_at) {
+      m.voice = null;
+      m.image = null;
+      m.file = null;
+    } else if (m.type === 'voice') {
       m.voice = voiceMap.get(m.id) ?? null;
     } else if (m.type === 'image') {
       m.image = imageMap.get(m.id) ?? null;
@@ -357,15 +406,16 @@ export async function acknowledgeRead(
   r2: R2Bucket | undefined,
   userId: string,
   messageIds: string[]
-): Promise<{ read: string[]; burned: string[]; skipped: string[] }> {
+): Promise<{ read: string[]; burned: string[]; skipped: string[]; burn_windows?: Record<string, number> }> {
   const read: string[] = [];
   const burned: string[] = [];
   const skipped: string[] = [];
+  const burn_windows: Record<string, number> = {};
   const now = Date.now();
 
   for (const id of messageIds) {
     const msg = await db.prepare(`
-      SELECT m.id, m.conversation_id, m.sender_id, m.retention, m.status
+      SELECT m.id, m.conversation_id, m.sender_id, m.retention, m.status, m.burn_after_seconds
       FROM messages m
       JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
       WHERE m.id = ?
@@ -375,6 +425,7 @@ export async function acknowledgeRead(
       sender_id: string;
       retention: 'permanent' | 'on_read';
       status: string;
+      burn_after_seconds: number | null;
     }>();
 
     if (!msg || msg.sender_id === userId) {
@@ -431,10 +482,21 @@ export async function acknowledgeRead(
     }
 
     if (msg.retention === 'on_read') {
-      // Burn on read: in both 1:1 and groups, reading burns the message for this recipient.
-      // Full dual-storage destruction in D1 & R2 occurs when ALL recipients have read.
+      // Burn on read: allow viewing for at least 30s.
+      // Physical destruction delays until all recipients read AND all viewing windows elapse.
+      const burnWindowSeconds = msg.burn_after_seconds ?? 30;
+      burn_windows[id] = burnWindowSeconds;
+      const burnWindowMs = burnWindowSeconds * 1000;
       if (allRead) {
-        await destroyMessage(db, r2, id);
+        const latestReadRes = await db.prepare(`
+          SELECT MAX(timestamp) as latest_read
+          FROM message_receipts
+          WHERE message_id = ? AND status = 'read'
+        `).bind(id).first<{ latest_read: number | null }>();
+        const latestRead = latestReadRes?.latest_read ?? now;
+        if (now - latestRead >= burnWindowMs) {
+          await destroyMessage(db, r2, id);
+        }
       }
       burned.push(id);
     } else {
@@ -447,7 +509,7 @@ export async function acknowledgeRead(
     }
   }
 
-  return { read, burned, skipped };
+  return { read, burned, skipped, burn_windows };
 }
 
 export async function getMessageReceipts(
@@ -540,5 +602,56 @@ export async function getMessageReceipts(
     all_delivered,
     all_read,
     receipts: recipientList,
+  };
+}
+
+export async function recallMessage(
+  db: D1Database,
+  r2: R2Bucket | undefined,
+  userId: string,
+  messageId: string,
+  recallWindowSeconds = 30
+): Promise<{ success: boolean; message_id: string; recalled_at: number }> {
+  const msg = await db.prepare(
+    'SELECT id, conversation_id, sender_id, type, created_at, recalled_at FROM messages WHERE id = ?'
+  ).bind(messageId).first<{
+    id: string;
+    conversation_id: string;
+    sender_id: string;
+    type: string;
+    created_at: number;
+    recalled_at: number | null;
+  }>();
+
+  if (!msg) {
+    throw new Error('Message not found');
+  }
+
+  if (msg.sender_id !== userId) {
+    throw new Error('Unauthorized: only the sender can recall this message');
+  }
+
+  if (msg.recalled_at) {
+    throw new Error('Message has already been recalled');
+  }
+
+  const now = Date.now();
+  const windowMs = recallWindowSeconds * 1000;
+  if (now - msg.created_at > windowMs) {
+    throw new Error(`Recall window has expired (${recallWindowSeconds}s limit)`);
+  }
+
+  await destroyMediaOnly(db, r2, messageId);
+
+  await db.prepare(
+    "UPDATE messages SET recalled_at = ?, content = '[Message recalled]' WHERE id = ?"
+  ).bind(now, messageId).run();
+
+  await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, msg.conversation_id).run();
+
+  return {
+    success: true,
+    message_id: messageId,
+    recalled_at: now,
   };
 }

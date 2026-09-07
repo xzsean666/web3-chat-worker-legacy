@@ -31,6 +31,11 @@
 ### 2.1 `users`
 - `id`: TEXT PRIMARY KEY (normalized lowercased EVM 0x... wallet address)
 - `wallet_address`: TEXT UNIQUE NOT NULL (lowercased 0x... hex address)
+- `avatar_key`: TEXT (Cloudflare R2 object key for user's single avatar)
+- `avatar_mime`: TEXT (avatar MIME type, e.g. `image/png`)
+- `avatar_updated_at`: INTEGER (UNIX timestamp ms of avatar upload)
+- `public_metadata`: TEXT (JSON string, publicly readable by all users, editable only by owner)
+- `private_metadata`: TEXT (JSON string, private to user, readable and editable only by owner)
 - `created_at`: INTEGER NOT NULL (UNIX timestamp ms)
 - `updated_at`: INTEGER NOT NULL
 
@@ -75,6 +80,9 @@
 - `content`: TEXT (text body or media metadata summary / caption)
 - `retention`: TEXT NOT NULL DEFAULT 'permanent' CHECK(retention IN ('permanent', 'on_read'))
 - `status`: TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'delivered', 'read'))
+- `burn_after_seconds`: INTEGER DEFAULT 30 (minimum viewing grace window in seconds for burn-on-read)
+- `recalled_at`: INTEGER (UNIX timestamp ms if recalled within 30 seconds by sender)
+- `mentions`: TEXT (JSON array string of mentioned wallet addresses)
 - `expires_at`: INTEGER NOT NULL (timestamp ms)
 - `delivered_at`: INTEGER
 - `read_at`: INTEGER
@@ -117,6 +125,24 @@
 - `size`: INTEGER NOT NULL
 - `created_at`: INTEGER NOT NULL
 
+### 2.11 `friends`
+- `id`: TEXT PRIMARY KEY
+- `user_id`: TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
+- `friend_id`: TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
+- `alias`: TEXT
+- `tags`: TEXT (JSON array string)
+- `created_at`: INTEGER NOT NULL
+- `updated_at`: INTEGER NOT NULL
+- UNIQUE(user_id, friend_id)
+
+### 2.12 `blacklist`
+- `id`: TEXT PRIMARY KEY
+- `user_id`: TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
+- `blocked_id`: TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
+- `reason`: TEXT
+- `created_at`: INTEGER NOT NULL
+- UNIQUE(user_id, blocked_id)
+
 ## 3. High Performance Incremental Sync Protocol
 To satisfy client performance and simple interaction:
 - **Cursor Sync API**:
@@ -133,21 +159,19 @@ To satisfy client performance and simple interaction:
   `GET /messages/:id/receipts`
   Returns delivery & read status for each recipient in direct or group chats (`pending`, `delivered`, `read`), along with aggregated counts (`delivered_count`, `read_count`, `all_delivered`, `all_read`).
 
-## 4. Ephemeral Lifecycle & 1:N Group Delivery Rollup
+## 4. Ephemeral Lifecycle, Recall & Social Protections
 - **Per-Recipient Delivery Tracking**:
   Each recipient acknowledges delivery individually. In 1:1 chats, message status becomes `delivered` upon the recipient's ACK. In 1:N group chats, `messages.status` transitions to `delivered` only when **all** other members have acknowledged delivery.
-- **Read ACK & Burn-on-Read Synchronization (Per-Recipient Burn + Full Dual Destruction)**:
+- **Read ACK & Burn-on-Read 30-Second Viewing Grace Window**:
   When a recipient reads an `on_read` message:
-  1. The API always responds with `{ status: "burned" }`, allowing the reader's client to trigger burn animations and delete local state immediately.
-  2. For the reading user, subsequent `/conversations/:id/messages` and `/sync` calls automatically filter out the read `on_read` message, and voice playback requests (`GET /voice/:id`) return HTTP 404 to prevent re-listening.
-  3. In 1:1 chat, reading the message immediately triggers atomic dual-storage destruction in D1 & R2.
-  4. In 1:N group chat, the message row and R2 audio remain preserved in transit for unread members.
-  5. Upon the final recipient's read ACK (`all_read === true`), atomic dual-storage destruction executes:
-     - If voice, delete R2 audio object from `voice_messages`.
-     - Delete D1 record from `messages` (cascading to `voice_messages` and `message_receipts`).
-- **Expiration Purge**:
-  Messages with `expires_at <= now()` are filtered out in queries, and swept by a scheduled cron trigger:
-  Find expired voice messages -> delete R2 files -> delete expired D1 message rows.
+  1. The API responds with `{ status: "burned", burn_after_seconds: 30 }`.
+  2. For the reading user, the message remains viewable and media downloadable for at least 30 seconds (`(now - read_timestamp) < burn_after_seconds * 1000`) before being filtered out from sync/queries and media downloads returning HTTP 404.
+  3. In 1:1 chats, physical destruction of D1 row and R2 binary executes once the 30-second viewing window elapses.
+  4. In 1:N group chats, physical destruction executes once **all** non-sender members have read AND all viewing windows have elapsed.
+- **30-Second Message Recall**:
+  Senders can recall messages within 30 seconds of creation (`POST /messages/:id/recall`). If the message contains audio, image, or file attachments, the R2 binaries are immediately purged and media metadata is cleared.
+- **Blacklist Chat Enforcement**:
+  If user B has blocked user A, user A cannot initiate a 1:1 conversation with B or send messages to B (returns HTTP 403 Forbidden).
 
 ## 5. Server Relay vs. Client Local-First Sovereign Storage
 - **Server Role (Ephemeral Mailbox / Transit Node)**:

@@ -94,12 +94,17 @@ export async function verifySignatureAndLogin(
 
   if (!user) {
     await db.prepare(
-      'INSERT INTO users (id, wallet_address, created_at, updated_at) VALUES (?, ?, ?, ?)'
-    ).bind(walletAddress, walletAddress, now, now).run();
+      'INSERT INTO users (id, wallet_address, public_metadata, private_metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(walletAddress, walletAddress, '{}', '{}', now, now).run();
 
     user = {
       id: walletAddress,
       wallet_address: walletAddress,
+      public_metadata: '{}',
+      private_metadata: '{}',
+      avatar_key: null,
+      avatar_mime: null,
+      avatar_updated_at: null,
       created_at: now,
       updated_at: now,
     };
@@ -149,6 +154,11 @@ export async function validateSession(
       s.expires_at AS session_expires_at,
       s.created_at AS session_created_at,
       u.wallet_address,
+      u.public_metadata,
+      u.private_metadata,
+      u.avatar_key,
+      u.avatar_mime,
+      u.avatar_updated_at,
       u.created_at AS user_created_at,
       u.updated_at AS user_updated_at
     FROM sessions s
@@ -161,6 +171,11 @@ export async function validateSession(
     session_expires_at: number;
     session_created_at: number;
     wallet_address: string;
+    public_metadata: string;
+    private_metadata: string;
+    avatar_key: string | null;
+    avatar_mime: string | null;
+    avatar_updated_at: number | null;
     user_created_at: number;
     user_updated_at: number;
   }>();
@@ -178,6 +193,11 @@ export async function validateSession(
     user: {
       id: row.wallet_address,
       wallet_address: row.wallet_address,
+      public_metadata: row.public_metadata ?? '{}',
+      private_metadata: row.private_metadata ?? '{}',
+      avatar_key: row.avatar_key ?? null,
+      avatar_mime: row.avatar_mime ?? null,
+      avatar_updated_at: row.avatar_updated_at ?? null,
       created_at: row.user_created_at,
       updated_at: row.user_updated_at,
     },

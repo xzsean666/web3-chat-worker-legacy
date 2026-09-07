@@ -20,6 +20,7 @@ export interface UploadVoiceParams {
   duration: number;
   retention?: 'permanent' | 'on_read';
   expires_in_seconds?: number;
+  burn_after_seconds?: number;
 }
 
 export async function uploadVoiceMessage(
@@ -61,6 +62,7 @@ export async function uploadVoiceMessage(
   const objectKey = `voice/${messageId}.${ext}`;
   const now = Date.now();
   const retention = params.retention || 'permanent';
+  const burnAfterSeconds = params.burn_after_seconds !== undefined ? Math.max(Number(params.burn_after_seconds), 0) : 30;
   const expiresInMs =
     params.expires_in_seconds && params.expires_in_seconds > 0
       ? params.expires_in_seconds * 1000
@@ -82,9 +84,9 @@ export async function uploadVoiceMessage(
   // 6. Save message and voice metadata in D1
   await db.prepare(`
     INSERT INTO messages (
-      id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at
-    ) VALUES (?, ?, ?, 'voice', ?, ?, 'pending', ?, ?)
-  `).bind(messageId, params.conversation_id, senderId, `[Voice: ${duration}s]`, retention, expiresAt, now).run();
+      id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds
+    ) VALUES (?, ?, ?, 'voice', ?, ?, 'pending', ?, ?, ?)
+  `).bind(messageId, params.conversation_id, senderId, `[Voice: ${duration}s]`, retention, expiresAt, now, burnAfterSeconds).run();
 
   await db.prepare(`
     INSERT INTO voice_messages (
@@ -143,11 +145,22 @@ export async function getVoiceMetadata(
   messageId: string
 ): Promise<VoiceMessageRow> {
   const msg = await db.prepare(
-    'SELECT id, conversation_id, expires_at, retention FROM messages WHERE id = ?'
-  ).bind(messageId).first<{ id: string; conversation_id: string; expires_at: number; retention: string }>();
+    'SELECT id, conversation_id, expires_at, retention, burn_after_seconds, recalled_at FROM messages WHERE id = ?'
+  ).bind(messageId).first<{
+    id: string;
+    conversation_id: string;
+    expires_at: number;
+    retention: string;
+    burn_after_seconds: number | null;
+    recalled_at: number | null;
+  }>();
 
   if (!msg) {
     throw new Error('Message not found');
+  }
+
+  if (msg.recalled_at) {
+    throw new Error('Message was recalled');
   }
 
   const membership = await db.prepare(
@@ -164,11 +177,14 @@ export async function getVoiceMetadata(
 
   if (msg.retention === 'on_read') {
     const alreadyRead = await db.prepare(
-      "SELECT 1 FROM message_receipts WHERE message_id = ? AND user_id = ? AND status = 'read'"
-    ).bind(messageId, userId).first();
+      "SELECT timestamp FROM message_receipts WHERE message_id = ? AND user_id = ? AND status = 'read'"
+    ).bind(messageId, userId).first<{ timestamp: number }>();
 
     if (alreadyRead) {
-      throw new Error('Message not found or already burned');
+      const burnWindowMs = (msg.burn_after_seconds ?? 30) * 1000;
+      if (Date.now() - alreadyRead.timestamp >= burnWindowMs) {
+        throw new Error('Message not found or already burned');
+      }
     }
   }
 

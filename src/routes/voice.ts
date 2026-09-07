@@ -16,6 +16,7 @@ voiceRoutes.post('/upload', async (c) => {
     let duration = 0;
     let retention: 'permanent' | 'on_read' = 'permanent';
     let expiresInSeconds: number | undefined;
+    let burnAfterSeconds: number | undefined;
     let audioData: Uint8Array;
     let mimeType = 'audio/webm';
 
@@ -26,6 +27,9 @@ voiceRoutes.post('/upload', async (c) => {
       retention = (body['retention'] as any) || 'permanent';
       if (body['expires_in_seconds']) {
         expiresInSeconds = parseInt(body['expires_in_seconds'] as string, 10);
+      }
+      if (body['burn_after_seconds']) {
+        burnAfterSeconds = parseInt(body['burn_after_seconds'] as string, 10);
       }
 
       const file = body['file'] || body['audio'];
@@ -44,6 +48,7 @@ voiceRoutes.post('/upload', async (c) => {
       duration = Number(json.duration) || 0;
       retention = json.retention || 'permanent';
       expiresInSeconds = json.expires_in_seconds ? Number(json.expires_in_seconds) : undefined;
+      burnAfterSeconds = json.burn_after_seconds !== undefined ? Number(json.burn_after_seconds) : undefined;
       mimeType = json.mime_type || 'audio/webm';
 
       if (!json.audio_base64) {
@@ -69,6 +74,7 @@ voiceRoutes.post('/upload', async (c) => {
       duration,
       retention,
       expires_in_seconds: expiresInSeconds,
+      burn_after_seconds: burnAfterSeconds,
     });
 
     return c.json(result, 201);

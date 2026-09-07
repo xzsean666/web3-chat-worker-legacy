@@ -316,16 +316,19 @@ async function main() {
   if (charlieReadRes.status !== 200 || charlieReadRes.data?.status !== 'burned') {
     throw new Error(`Expected status 'burned' for Charlie read, got: ${JSON.stringify(charlieReadRes.data)}`);
   }
-  logSuccess(`Charlie read voice message (status: burned, audio preserved in R2 for Bob)`);
+  if (charlieReadRes.data?.burn_after_seconds !== 30) {
+    throw new Error(`Expected burn_after_seconds=30, got: ${charlieReadRes.data?.burn_after_seconds}`);
+  }
+  logSuccess(`Charlie read voice message (status: burned, burn_after_seconds: 30, audio preserved in R2)`);
 
-  // Charlie attempts repeat download -> should be rejected with 404
-  const charlieRepeatDownload = await request(`/voice/${voiceMsgId}`, {
+  // Charlie can still stream within the 30-second viewing window
+  const charlieWindowDownload = await request(`/voice/${voiceMsgId}`, {
     headers: { Authorization: `Bearer ${charlie.token}` },
   });
-  if (charlieRepeatDownload.status !== 404) {
-    throw new Error(`Expected HTTP 404 for Charlie repeat download, got: ${charlieRepeatDownload.status}`);
+  if (charlieWindowDownload.status !== 200) {
+    throw new Error(`Expected HTTP 200 within 30s viewing window, got: ${charlieWindowDownload.status}`);
   }
-  logSuccess(`Verified Charlie cannot re-download audio after reading (HTTP 404)`);
+  logSuccess(`Verified Charlie can still listen within 30s viewing window (HTTP 200)`);
 
   // Alice checks message receipts
   const receiptsRes = await request(`/messages/${voiceMsgId}/receipts`, {
@@ -336,7 +339,7 @@ async function main() {
   }
   logSuccess(`Receipts verified: Charlie (read), Bob (pending), all_read=false`);
 
-  // Bob reads the voice message (2 of 2 recipients -> triggers dual destruction)
+  // Bob reads the voice message (2 of 2 recipients -> all read)
   const bobReadRes = await request(`/messages/${voiceMsgId}/read`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${bob.token}` },
@@ -344,16 +347,16 @@ async function main() {
   if (bobReadRes.status !== 200 || bobReadRes.data?.status !== 'burned') {
     throw new Error(`Burn-on-read failed: ${JSON.stringify(bobReadRes.data)}`);
   }
-  logSuccess(`Bob read message -> All recipients read -> Burn-on-read triggered (status: burned)`);
+  logSuccess(`Bob read message -> All recipients read (status: burned)`);
 
-  // Verify subsequent download returns 404 (deleted from both D1 & R2)
-  const deadDownload = await request(`/voice/${voiceMsgId}`, {
+  // Bob can also stream within his 30s viewing window
+  const bobWindowDownload = await request(`/voice/${voiceMsgId}`, {
     headers: { Authorization: `Bearer ${bob.token}` },
   });
-  if (deadDownload.status !== 404) {
-    throw new Error(`Expected HTTP 404 for burned audio, got: ${deadDownload.status}`);
+  if (bobWindowDownload.status !== 200) {
+    throw new Error(`Expected HTTP 200 for Bob within 30s viewing window, got: ${bobWindowDownload.status}`);
   }
-  logSuccess(`Verified dual-storage destruction: subsequent download returned HTTP 404`);
+  logSuccess(`Verified Bob can also listen within his 30s viewing window (HTTP 200)`);
 
   // 7. Image Upload (R2) & Burn-on-Read Dual Destruction
   logStep('Step 7', 'Image Upload (R2), Metadata, Streaming & Burn-on-Read');
@@ -425,18 +428,18 @@ async function main() {
   if (charlieImgRead.status !== 200 || charlieImgRead.data?.status !== 'burned') {
     throw new Error(`Expected status 'burned' for Charlie image read: ${JSON.stringify(charlieImgRead.data)}`);
   }
-  logSuccess(`Charlie read image message (status: burned, image preserved in R2 for Bob)`);
+  logSuccess(`Charlie read image message (status: burned, burn_after_seconds: 30, image preserved in R2)`);
 
-  // Charlie re-download attempt should be rejected with 404
+  // Charlie can still stream image within 30s viewing window
   const charlieImgRepeat = await request(`/images/${imgMsgId}`, {
     headers: { Authorization: `Bearer ${charlie.token}` },
   });
-  if (charlieImgRepeat.status !== 404) {
-    throw new Error(`Expected HTTP 404 for Charlie repeat image view, got: ${charlieImgRepeat.status}`);
+  if (charlieImgRepeat.status !== 200) {
+    throw new Error(`Expected HTTP 200 for Charlie within 30s viewing window, got: ${charlieImgRepeat.status}`);
   }
-  logSuccess(`Verified Charlie cannot re-fetch image after reading (HTTP 404)`);
+  logSuccess(`Verified Charlie can still stream image within 30s viewing window (HTTP 200)`);
 
-  // Bob reads the image message (2 of 2 recipients -> triggers dual destruction)
+  // Bob reads the image message (2 of 2 recipients -> all read)
   const bobImgRead = await request(`/messages/${imgMsgId}/read`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${bob.token}` },
@@ -444,16 +447,16 @@ async function main() {
   if (bobImgRead.status !== 200 || bobImgRead.data?.status !== 'burned') {
     throw new Error(`Burn-on-read failed for Bob image read: ${JSON.stringify(bobImgRead.data)}`);
   }
-  logSuccess(`Bob read image message -> All recipients read -> Burn-on-read triggered`);
+  logSuccess(`Bob read image message -> All recipients read (status: burned)`);
 
-  // Subsequent download by Bob should return 404
-  const deadImgDownload = await request(`/images/${imgMsgId}`, {
+  // Bob can also stream within 30s viewing window
+  const bobImgDownload = await request(`/images/${imgMsgId}`, {
     headers: { Authorization: `Bearer ${bob.token}` },
   });
-  if (deadImgDownload.status !== 404) {
-    throw new Error(`Expected HTTP 404 for burned image, got: ${deadImgDownload.status}`);
+  if (bobImgDownload.status !== 200) {
+    throw new Error(`Expected HTTP 200 for Bob within 30s viewing window, got: ${bobImgDownload.status}`);
   }
-  logSuccess(`Verified image dual-storage destruction: subsequent download returned HTTP 404`);
+  logSuccess(`Verified Bob can also stream image within 30s viewing window (HTTP 200)`);
 
   // 8. File Upload (R2), Path Sanitization, Download & Dual Destruction
   logStep('Step 8', 'File Upload (R2), Path Sanitization, Download & Dual Destruction');
@@ -521,18 +524,18 @@ async function main() {
   if (charlieFileRead.status !== 200 || charlieFileRead.data?.status !== 'burned') {
     throw new Error(`Expected status 'burned' for Charlie file read: ${JSON.stringify(charlieFileRead.data)}`);
   }
-  logSuccess(`Charlie read file message (status: burned, preserved for Bob)`);
+  logSuccess(`Charlie read file message (status: burned, burn_after_seconds: 30, preserved for Bob)`);
 
-  // Charlie re-download attempt should be rejected with 404
+  // Charlie can still download file within 30s viewing window
   const charlieFileRepeat = await request(`/files/${fileMsgId}`, {
     headers: { Authorization: `Bearer ${charlie.token}` },
   });
-  if (charlieFileRepeat.status !== 404) {
-    throw new Error(`Expected HTTP 404 for Charlie repeat file download, got: ${charlieFileRepeat.status}`);
+  if (charlieFileRepeat.status !== 200) {
+    throw new Error(`Expected HTTP 200 for Charlie within 30s viewing window, got: ${charlieFileRepeat.status}`);
   }
-  logSuccess(`Verified Charlie cannot re-download file after reading (HTTP 404)`);
+  logSuccess(`Verified Charlie can still download file within 30s viewing window (HTTP 200)`);
 
-  // Bob reads the file message (2 of 2 recipients -> triggers dual destruction)
+  // Bob reads the file message (2 of 2 recipients -> all read)
   const bobFileRead = await request(`/messages/${fileMsgId}/read`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${bob.token}` },
@@ -540,16 +543,16 @@ async function main() {
   if (bobFileRead.status !== 200 || bobFileRead.data?.status !== 'burned') {
     throw new Error(`Burn-on-read failed for Bob file read: ${JSON.stringify(bobFileRead.data)}`);
   }
-  logSuccess(`Bob read file message -> All recipients read -> Burn-on-read triggered`);
+  logSuccess(`Bob read file message -> All recipients read (status: burned)`);
 
-  // Subsequent download returns 404
-  const deadFileDownload = await request(`/files/${fileMsgId}`, {
+  // Bob can also download file within his 30s viewing window
+  const bobFileDownload = await request(`/files/${fileMsgId}`, {
     headers: { Authorization: `Bearer ${bob.token}` },
   });
-  if (deadFileDownload.status !== 404) {
-    throw new Error(`Expected HTTP 404 for burned file, got: ${deadFileDownload.status}`);
+  if (bobFileDownload.status !== 200) {
+    throw new Error(`Expected HTTP 200 for Bob within 30s viewing window, got: ${bobFileDownload.status}`);
   }
-  logSuccess(`Verified file dual-storage destruction: subsequent download returned HTTP 404`);
+  logSuccess(`Verified Bob can also download file within his 30s viewing window (HTTP 200)`);
 
   // 9. Incremental Sync & Batch ACK
   logStep('Step 9', 'Incremental Global Sync & Batch ACK');
@@ -624,8 +627,266 @@ async function main() {
   }
   logSuccess(`Scheduled sweeper purged ${sweepRes.data.purged_messages} expired message(s)`);
 
-  // 11. Session Logout & Revocation
-  logStep('Step 11', 'Session Logout & Revocation');
+  // 11. User Dual-Metadata & Single Avatar Storage (TASK-014)
+  logStep('Step 11', 'User Dual-Metadata & Single Avatar Storage (TASK-014)');
+  // Alice updates her metadata
+  const metaUpdateRes = await request('/users/me/metadata', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({
+      public_metadata: { nickname: 'Alice BUIDLer', twitter: '@alice_live' },
+      private_metadata: { theme: 'dark', notifications_enabled: true },
+    }),
+  });
+  if (metaUpdateRes.status !== 200 || metaUpdateRes.data?.user?.public_metadata?.nickname !== 'Alice BUIDLer') {
+    throw new Error(`Metadata update failed: ${JSON.stringify(metaUpdateRes.data)}`);
+  }
+  logSuccess(`Alice updated public and private metadata`);
+
+  // Alice fetches her own profile via /users/me
+  const aliceMeRes = await request('/users/me', {
+    headers: { Authorization: `Bearer ${alice.token}` },
+  });
+  if (aliceMeRes.status !== 200 || aliceMeRes.data?.user?.private_metadata?.theme !== 'dark') {
+    throw new Error(`Alice cannot read her private metadata: ${JSON.stringify(aliceMeRes.data)}`);
+  }
+  logSuccess(`Alice read own profile with private metadata`);
+
+  // Bob fetches Alice's profile via /users/:address -> private_metadata must be hidden
+  const alicePublicRes = await request(`/users/${alice.address}`);
+  if (alicePublicRes.status !== 200 || alicePublicRes.data?.user?.public_metadata?.nickname !== 'Alice BUIDLer') {
+    throw new Error(`Failed to fetch Alice's public profile: ${JSON.stringify(alicePublicRes.data)}`);
+  }
+  if (alicePublicRes.data?.user?.private_metadata !== undefined) {
+    throw new Error(`Private metadata leaked in public profile! ${JSON.stringify(alicePublicRes.data)}`);
+  }
+  logSuccess(`Bob read Alice's public profile (private metadata strictly omitted)`);
+
+  // Alice uploads avatar
+  const avatarUploadRes = await request('/users/me/avatar', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({
+      avatar_base64: imageBase64,
+      mime_type: 'image/png',
+    }),
+  });
+  if ((avatarUploadRes.status !== 200 && avatarUploadRes.status !== 201) || !avatarUploadRes.data?.avatar_url) {
+    throw new Error(`Avatar upload failed: ${JSON.stringify(avatarUploadRes.data)}`);
+  }
+  logSuccess(`Alice uploaded single avatar to R2`);
+
+  // Bob accesses Alice's avatar publicly without Authorization header
+  const avatarStreamRes = await request(`/users/${alice.address}/avatar`);
+  if (avatarStreamRes.status !== 200) {
+    throw new Error(`Public avatar fetch failed: ${avatarStreamRes.status}`);
+  }
+  logSuccess(`Bob streamed Alice's avatar publicly without token (HTTP 200)`);
+
+  // 12. 30-Second Message Recall & Instant R2 Media Purge (TASK-015)
+  logStep('Step 12', '30-Second Message Recall & Instant R2 Media Purge (TASK-015)');
+  // Bob sends a message to the group
+  const textToRecallRes = await request(`/conversations/${groupId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bob.token}` },
+    body: JSON.stringify({ content: 'Message to be recalled within 30s' }),
+  });
+  const textToRecallId = textToRecallRes.data.id;
+
+  // Alice attempts to recall Bob's message -> 403 Forbidden
+  const unauthorizedRecallRes = await request(`/messages/${textToRecallId}/recall`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${alice.token}` },
+  });
+  if (unauthorizedRecallRes.status !== 403) {
+    throw new Error(`Expected HTTP 403 for non-sender recall, got: ${unauthorizedRecallRes.status}`);
+  }
+  logSuccess(`Verified non-sender cannot recall message (HTTP 403)`);
+
+  // Bob recalls his own message
+  const recallRes = await request(`/messages/${textToRecallId}/recall`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${bob.token}` },
+  });
+  if (recallRes.status !== 200 || !recallRes.data?.recalled_at) {
+    throw new Error(`Message recall failed: ${JSON.stringify(recallRes.data)}`);
+  }
+  logSuccess(`Bob recalled message within 30 seconds`);
+
+  // Bob uploads an image message to group and recalls it immediately
+  const imgToRecallRes = await request('/images/upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bob.token}` },
+    body: JSON.stringify({
+      conversation_id: groupId,
+      image_base64: imageBase64,
+      mime_type: 'image/png',
+      caption: 'Photo to recall',
+    }),
+  });
+  const imgToRecallId = imgToRecallRes.data.message.id;
+
+  // Recall image message
+  const recallImgRes = await request(`/messages/${imgToRecallId}/recall`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${bob.token}` },
+  });
+  if (recallImgRes.status !== 200) {
+    throw new Error(`Image recall failed: ${JSON.stringify(recallImgRes.data)}`);
+  }
+  logSuccess(`Bob recalled image message`);
+
+  // Subsequent download attempt of recalled image must return 404 immediately (purged from R2)
+  const deadRecalledImg = await request(`/images/${imgToRecallId}`, {
+    headers: { Authorization: `Bearer ${alice.token}` },
+  });
+  if (deadRecalledImg.status !== 404) {
+    throw new Error(`Expected HTTP 404 for recalled image download, got: ${deadRecalledImg.status}`);
+  }
+  logSuccess(`Verified media binary is immediately purged from R2 upon recall (HTTP 404)`);
+
+  // 13. Burn-on-Read 30s Viewing Window & Immediate Availability (TASK-015)
+  logStep('Step 13', 'Burn-on-Read 30s Viewing Window & Immediate Availability (TASK-015)');
+  // Alice sends direct on_read message to Bob
+  const burnGraceMsgRes = await request(`/conversations/${directConvId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({ content: 'Confidential 30s viewing message', retention: 'on_read' }),
+  });
+  const burnGraceMsgId = burnGraceMsgRes.data.id;
+
+  // Bob reads the message
+  const bobBurnReadRes = await request(`/messages/${burnGraceMsgId}/read`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${bob.token}` },
+  });
+  if (bobBurnReadRes.status !== 200 || bobBurnReadRes.data?.status !== 'burned') {
+    throw new Error(`Read ACK failed: ${JSON.stringify(bobBurnReadRes.data)}`);
+  }
+  if (bobBurnReadRes.data?.burn_after_seconds !== 30) {
+    throw new Error(`Expected burn_after_seconds=30, got: ${bobBurnReadRes.data?.burn_after_seconds}`);
+  }
+  logSuccess(`Bob read ephemeral message (status: burned, burn_after_seconds: 30)`);
+
+  // Immediately query conversation messages: Bob can STILL read it within the 30s grace window!
+  const bobFetchMsgs = await request(`/conversations/${directConvId}/messages`, {
+    headers: { Authorization: `Bearer ${bob.token}` },
+  });
+  const foundBurnMsg = bobFetchMsgs.data?.messages?.find((m: any) => m.id === burnGraceMsgId);
+  if (!foundBurnMsg) {
+    throw new Error(`Burn-on-read message was prematurely filtered out within 30s viewing window!`);
+  }
+  logSuccess(`Verified message remains readable for reader within the 30-second grace window`);
+
+  // 14. Social System: Friends, Custom Aliases, Tags & Mentions (TASK-016)
+  logStep('Step 14', 'Social System: Friends, Custom Aliases, Tags & Mentions (TASK-016)');
+  // Alice adds Bob as friend
+  const addFriendRes = await request('/friends', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({
+      friend_address: bob.address,
+      alias: 'Bobby BUIDLer',
+      tags: ['crypto', 'core-contributor'],
+    }),
+  });
+  const friendAlias = addFriendRes.data?.friend?.alias || addFriendRes.data?.alias;
+  if (addFriendRes.status !== 201 || friendAlias !== 'Bobby BUIDLer') {
+    throw new Error(`Add friend failed: ${JSON.stringify(addFriendRes.data)}`);
+  }
+  logSuccess(`Alice added Bob as friend with custom alias and tags`);
+
+  // Filter friends by tag
+  const filteredFriends = await request('/friends?tag=crypto', {
+    headers: { Authorization: `Bearer ${alice.token}` },
+  });
+  if (filteredFriends.status !== 200 || !filteredFriends.data?.friends?.some((f: any) => f.friend_address === bob.address)) {
+    throw new Error(`Filter friends by tag failed: ${JSON.stringify(filteredFriends.data)}`);
+  }
+  logSuccess(`Alice filtered friends by tag 'crypto'`);
+
+  // Query all tags
+  const tagsRes = await request('/friends/tags', {
+    headers: { Authorization: `Bearer ${alice.token}` },
+  });
+  if (tagsRes.status !== 200 || !tagsRes.data?.tags?.includes('crypto')) {
+    throw new Error(`Query friend tags failed: ${JSON.stringify(tagsRes.data)}`);
+  }
+  logSuccess(`Alice queried all tags: ${JSON.stringify(tagsRes.data.tags)}`);
+
+  // Alice sends group message with mentions
+  const mentionMsgRes = await request(`/conversations/${groupId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({
+      content: `Hey @${bob.address}, check out the new roadmap!`,
+      mentions: [bob.address],
+    }),
+  });
+  if (mentionMsgRes.status !== 201 || !mentionMsgRes.data?.mentions?.includes(bob.address)) {
+    throw new Error(`Mentions failed: ${JSON.stringify(mentionMsgRes.data)}`);
+  }
+  logSuccess(`Alice sent message mentioning Bob (mentions array recorded)`);
+
+  // Alice deletes Bob from friends
+  const delFriendRes = await request(`/friends/${bob.address}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${alice.token}` },
+  });
+  if (delFriendRes.status !== 200) {
+    throw new Error(`Delete friend failed: ${JSON.stringify(delFriendRes.data)}`);
+  }
+  logSuccess(`Alice removed Bob from friends list`);
+
+  // 15. Blacklist Enforcement & 1:1 Chat Blocking (TASK-016)
+  logStep('Step 15', 'Blacklist Enforcement & 1:1 Chat Blocking (TASK-016)');
+  // Charlie blocks Bob
+  const blockRes = await request('/blacklist', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${charlie.token}` },
+    body: JSON.stringify({
+      blocked_address: bob.address,
+      reason: 'Spamming',
+    }),
+  });
+  if (blockRes.status !== 201 || blockRes.data?.blocked_address !== bob.address) {
+    throw new Error(`Block user failed: ${JSON.stringify(blockRes.data)}`);
+  }
+  logSuccess(`Charlie added Bob to blacklist`);
+
+  // Verify Charlie's blacklist
+  const blListRes = await request('/blacklist', {
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  const blList = blListRes.data?.blacklist || blListRes.data?.blocked;
+  if (blListRes.status !== 200 || !blList?.some((b: any) => b.blocked_address === bob.address)) {
+    throw new Error(`Blacklist listing failed: ${JSON.stringify(blListRes.data)}`);
+  }
+  logSuccess(`Charlie verified Bob is present in blacklist`);
+
+  // Bob attempts to initiate direct conversation with Charlie -> HTTP 403 Forbidden!
+  const blockedConvRes = await request('/conversations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bob.token}` },
+    body: JSON.stringify({ target_wallet_address: charlie.address }),
+  });
+  if (blockedConvRes.status !== 403) {
+    throw new Error(`Expected HTTP 403 for blocked user conversation creation, got: ${blockedConvRes.status}`);
+  }
+  logSuccess(`Verified blocked user is rejected with HTTP 403 when initiating conversation`);
+
+  // Charlie unblocks Bob
+  const unblockRes = await request(`/blacklist/${bob.address}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  if (unblockRes.status !== 200) {
+    throw new Error(`Unblock user failed: ${JSON.stringify(unblockRes.data)}`);
+  }
+  logSuccess(`Charlie unblocked Bob`);
+
+  // 16. Session Logout & Revocation
+  logStep('Step 16', 'Session Logout & Revocation');
   const logoutRes = await request('/auth/logout', {
     method: 'POST',
     headers: { Authorization: `Bearer ${alice.token}` },

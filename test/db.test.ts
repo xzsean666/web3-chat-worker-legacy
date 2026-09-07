@@ -24,6 +24,8 @@ describe('D1 Database Schema & Migrations', () => {
     expect(tableNames).toContain('voice_messages');
     expect(tableNames).toContain('image_messages');
     expect(tableNames).toContain('file_messages');
+    expect(tableNames).toContain('friends');
+    expect(tableNames).toContain('blacklist');
   });
 
   it('enforces unique wallet_address on users', async () => {

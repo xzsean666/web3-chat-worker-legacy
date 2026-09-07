@@ -20,8 +20,11 @@
 9. [模块七：图片与文件消息上传与下载 (Images, Files &amp; R2)](#9-模块七图片与文件消息上传与下载-images-files--r2)
 10. [模块八：阅后即焚 (Burn-on-Read) 与消息过期 (TTL)](#10-模块八阅后即焚-burn-on-read-与消息过期-ttl)
 11. [模块九：增量全局同步引擎 (Incremental Sync)](#11-模块九增量全局同步引擎-incremental-sync)
-12. [前端 TypeScript 类型定义汇总](#12-前端-typescript-类型定义汇总)
-13. [完整前端集成示例代码 (TypeScript SDK)](#13-完整前端集成示例代码-typescript-sdk)
+12. [模块十：用户双重元数据 (Metadata) 与唯一头像 (Avatar &amp; R2)](#12-模块十用户双重元数据-metadata-与唯一头像-avatar--r2)
+13. [模块十一：消息30秒撤回 (Message Recall)](#13-模块十一消息30秒撤回-message-recall)
+14. [模块十二：社交系统：好友列表 (Friends)、好友标签 (Tags) 与黑名单 (Blacklist)](#14-模块十二社交系统好友列表-friends好友标签-tags-与黑名单-blacklist)
+15. [前端 TypeScript 类型定义汇总](#15-前端-typescript-类型定义汇总)
+16. [完整前端集成示例代码 (TypeScript SDK)](#16-完整前端集成示例代码-typescript-sdk)
 
 ---
 
@@ -956,27 +959,30 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 
 ### 10.1 阅后即焚生命周期流转 (1v1 私聊 与 1:N 群聊)
 
-1. **发送消息**：发送者指定 `retention: "on_read"`（支持文本、语音、图片、文件所有类型消息）。
-2. **拉取与展示**：接收方拉取到消息，UI 上展示“阅后即焚”占位符与标识。
+1. **发送消息**：发送者指定 `retention: "on_read"`（支持文本、语音、图片、文件所有类型消息），并可指定 `burn_after_seconds`（阅读后保留秒数，默认且最低为 30 秒）。
+2. **拉取与展示**：接收方拉取到消息，UI 上展示“阅后即焚 (30s)”占位符与标识。
 3. **播放/查看与已读上报**：
    - 客户端查看文本，或调用 `GET WORKER_BASE_URL/voice/:id`、`GET WORKER_BASE_URL/images/:id`、`GET WORKER_BASE_URL/files/:id` 下载内容。
-   - 用户阅读完毕或查看结束后，客户端主动调用 `POST WORKER_BASE_URL/messages/:id/read`。
-4. **即时返回 `burned` 状态（前端体验一致）**：
-   - 无论 1v1 私聊还是群聊，服务端成功记录已读后，均返回：
+   - 用户打开或点击查看消息时，客户端调用 `POST WORKER_BASE_URL/messages/:id/read` 上报已读。
+4. **即时返回 `burned` 状态与倒计时秒数**：
+   - 服务端记录已读回执时间戳后返回：
      ```json
      {
        "success": true,
        "message_id": "b315c4ec-d41f-48bb-b1dc-9a85f39cce93",
-       "status": "burned"
+       "status": "burned",
+       "burn_after_seconds": 30
      }
      ```
-   - 前端接收到 `"status": "burned"` 后，可立即在当前设备上触发销毁动画并抹除本地该条消息。
-5. **已读用户的服务端防护（防死灰复燃与防重放）**：
-   - 已读成员后续请求 `/conversations/:id/messages` 或增量同步 `/sync` 时，服务端自动在 SQL 层排除该成员已读的 `on_read` 消息，刷新聊天界面绝不再现。
-   - 已读成员后续再次请求 `/voice/:messageId`、`/images/:messageId` 或 `/files/:messageId` 下载媒体流时，服务端直接返回 `HTTP 404`（已焚毁）。
-6. **服务端的彻底双重物理擦除 (Dual Destruction)**：
-   - **1v1 私聊**：单个接收方阅读后，即视为全员阅读，立即执行 D1 `messages` 表行物理删除与 R2 媒体对象（音频/图片/文件）物理删除。
-   - **1:N 群聊**：消息在 D1/R2 中保留给尚未阅读的其余群成员。当群内**所有非发送者成员均完成已读确认 (`all_read === true`)** 时，服务端自动执行物理删除；若有成员长期离线未读，则在达到 `expires_at`（默认 24h）后由定时清理任务彻底清空。
+   - **至少 30 秒展示窗口保障**：
+     - 为确保接收方有充足时间完整浏览文本、查看图片或听取语音，在调用已读接口后的 **30 秒内（或指定的 `burn_after_seconds`）**，服务端允许该用户继续获取该消息内容及下载多媒体二进制流。
+     - 前端收到已读响应后，可启动 30 秒倒计时进度条动画。
+5. **30 秒窗口期满后的自动隐藏与防重放**：
+   - 距已读回执超过 30 秒后，该用户再次请求 `/conversations/:id/messages` 或增量同步 `/sync` 时，服务端自动在 SQL 层排除该消息。
+   - 超过 30 秒后再次请求 `/voice/:messageId`、`/images/:messageId` 或 `/files/:messageId` 下载媒体流时，服务端返回 `HTTP 404`（已焚毁）。
+6. **服务端的彻底双重物理擦除 (Dual Physical Destruction)**：
+   - **1v1 私聊**：当唯一的接收方完成已读且其 30 秒查看窗口期满后，服务端执行 D1 `messages` 表物理删除以及 R2 多媒体文件物理删除。
+   - **1:N 群聊**：消息在 D1/R2 中保留给尚未阅读的其余群成员。当群内**所有非发送者成员均完成已读且所有人的 30 秒查看窗口均已期满**时，服务端自动执行彻底物理删除；若有成员长期离线未读，则在达到 `expires_at`（默认 24h）后由定时清理任务清空。
 
 ### 10.2 TTL 自动过期与后台清理
 
@@ -1057,7 +1063,309 @@ setInterval(syncLoop, 3000);
 
 ---
 
-## 12. 前端 TypeScript 类型定义汇总
+## 12. 模块十：用户双重元数据 (Metadata) 与唯一头像 (Avatar & R2)
+
+### 12.1 架构设计与权限模型
+
+1. **双重元数据 (JSON Metadata)**：
+   - 每个用户具备两份独立的 JSON 元数据：
+     - `public_metadata`: 公开元数据（例如 nickname、bio、twitter、telegram、NFT 徽章等），**所有其他用户均可只读获取**。
+     - `private_metadata`: 私有元数据（例如通知设置、暗黑主题、本地配置、好友分组映射等），**仅用户本人可读写**，对外严格保密。
+   - **权限规则**：只有当前已登录的账号本人有权修改自己的 `public_metadata` 与 `private_metadata`，任何用户无法篡改他人元数据。
+2. **唯一头像存储 (Single Avatar Invariance)**：
+   - 每个用户在系统内有且仅有一个有效头像。
+   - 头像二进制保存在 Cloudflare R2 存储桶中，路径规范为 `avatars/<userId>/<uuid>.<ext>`。
+   - **单头像约束**：用户上传新头像时，服务端会自动从 R2 中物理删除旧的头像文件，确保存储空间不发生冗余膨胀。
+   - **公开读取**：头像资源接口 `GET /users/:address/avatar` 完全公开，支持任何第三方直接在 `<img src="..." />` 中引用，无需携带 Authorization 鉴权头。
+
+### 12.2 查询当前登录用户完整资料 (GET /users/me)
+
+- **请求路径**：`GET WORKER_BASE_URL/users/me`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "user": {
+      "id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+      "wallet_address": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+      "avatar_url": "/users/0x1610725056c027d5ae4e2fce73bb925c82c59eaa/avatar",
+      "avatar_mime": "image/png",
+      "avatar_updated_at": 1788587857000,
+      "public_metadata": {
+        "nickname": "Alice.eth",
+        "bio": "Web3 BUIDLer",
+        "twitter": "@alice_eth"
+      },
+      "private_metadata": {
+        "notifications": true,
+        "theme": "dark"
+      },
+      "created_at": 1788587800000,
+      "updated_at": 1788587857000
+    }
+  }
+  ```
+
+### 12.3 更新当前用户元数据 (PATCH /users/me/metadata)
+
+- **请求路径**：`PATCH WORKER_BASE_URL/users/me/metadata`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
+- **请求体 (application/json)**：
+  ```json
+  {
+    "public_metadata": {
+      "nickname": "Alice The Builder",
+      "bio": "Building decentralised chat apps",
+      "github": "alice"
+    },
+    "private_metadata": {
+      "theme": "system",
+      "enter_is_send": true
+    }
+  }
+  ```
+  *注：可单独传入 `public_metadata` 或 `private_metadata`，未传入的字段将保持不变。*
+- **成功响应 (`HTTP 200`)**：返回包含更新后完整属性的 `user` 对象。
+
+### 12.4 上传或更新唯一头像 (POST /users/me/avatar)
+
+- **请求路径**：`POST WORKER_BASE_URL/users/me/avatar`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
+- **请求方式 1：FormData 二进制上传 (推荐)**
+  - `file` 或 `avatar`: 图片二进制 Blob
+- **请求方式 2：Base64 字符串上传**
+  ```json
+  {
+    "avatar_base64": "iVBORw0KGgoAAAANSUhEUgAA...",
+    "mime_type": "image/png"
+  }
+  ```
+- **支持格式与大小**：`image/png`, `image/jpeg`, `image/webp`, `image/gif`，单张上限 5MB。
+- **成功响应 (`HTTP 201`)**：
+  ```json
+  {
+    "success": true,
+    "avatar_url": "/users/0x1610725056c027d5ae4e2fce73bb925c82c59eaa/avatar",
+    "avatar_mime": "image/png",
+    "avatar_updated_at": 1788587860000
+  }
+  ```
+
+### 12.5 查看其他用户公开资料 (GET /users/:address)
+
+- **请求路径**：`GET WORKER_BASE_URL/users/:address`（`:address` 可为钱包地址或用户 ID）
+- **公开接口**：无需登录凭据。
+- **安全性说明**：服务端严格过滤，响应中**绝不包含**对方的 `private_metadata`。
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "user": {
+      "id": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+      "wallet_address": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+      "avatar_url": "/users/0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2/avatar",
+      "avatar_mime": "image/jpeg",
+      "avatar_updated_at": 1788587850000,
+      "public_metadata": {
+        "nickname": "Bob",
+        "bio": "Smart contract auditor"
+      },
+      "created_at": 1788587800000,
+      "updated_at": 1788587850000
+    }
+  }
+  ```
+
+### 12.6 公开流式读取头像 (GET /users/:address/avatar)
+
+- **请求路径**：`GET WORKER_BASE_URL/users/:address/avatar`
+- **无需 Token**：支持浏览器 `<img src="WORKER_BASE_URL/users/:address/avatar" />` 直接访问。
+- **响应头**：
+  - `Content-Type`: 头像 MIME 类型
+  - `Cache-Control`: `public, max-age=3600`
+- **错误状态**：若该用户未曾上传头像，返回 `HTTP 404 {"error": "User has not uploaded an avatar"}`。
+
+---
+
+## 13. 模块十一：消息30秒撤回 (Message Recall)
+
+### 13.1 撤回核心规则
+
+1. **30 秒时效控制**：
+   - 默认撤回有效时间窗口为 **30 秒**（消息 `created_at` 距当前时间 30 秒内）。服务端可通过环境变量 `MESSAGE_RECALL_WINDOW_SECONDS` 进行调节。
+   - 超过 30 秒的撤回请求将被拒绝，返回 `HTTP 400 {"error": "Recall window has expired (30 seconds)"}`。
+2. **发送方本人权限**：
+   - 仅消息的原始发送者（`sender_id`）有权发起撤回，他人发起直接返回 `HTTP 403 Forbidden`。
+3. **媒体资源即时物理删除**：
+   - 若撤回的消息为语音 (`voice`)、图片 (`image`) 或文件 (`file`)，服务端在记录撤回状态的同时，会**立即调用 R2 接口彻底物理删除多媒体对象文件**，并清理媒体关联元数据，杜绝媒体被截获或下载。
+4. **消息状态流转**：
+   - 撤回后消息保留在数据库中作为已撤回记录（记录 `recalled_at` 时间戳）。
+   - 在客户端消息列表或增量同步 `/sync` 中，该条消息表现为：
+     - `type`: `"recalled"`
+     - `content`: `"This message was recalled"`
+     - `voice` / `image` / `file` 为 `null`
+     - 尝试调用媒体下载接口（如 `/voice/:id`）会返回 `HTTP 404`。
+
+### 13.2 发起消息撤回接口 (POST /messages/:id/recall)
+
+- **请求路径**：`POST WORKER_BASE_URL/messages/:id/recall`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
+- **请求体**：空或 `{}`
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "success": true,
+    "message_id": "b315c4ec-d41f-48bb-b1dc-9a85f39cce93",
+    "recalled_at": 1788587870000
+  }
+  ```
+- **常见错误**：
+  - `HTTP 400`: `{"error": "Recall window has expired (30 seconds)"}`
+  - `HTTP 403`: `{"error": "Forbidden: Only the sender can recall this message"}`
+  - `HTTP 400`: `{"error": "Message is already recalled"}`
+
+---
+
+## 14. 模块十二：社交系统：好友列表 (Friends)、好友标签 (Tags) 与黑名单 (Blacklist)
+
+### 14.1 好友列表与标签分类 (Friends & Tags)
+
+用户可以单向添加其他用户为好友，为好友指定专属的**备注名 (`alias`)**以及多个**标签 (`tags`)**（例如 `["工作", "DAO", "核心伙伴"]`）。
+
+#### 1. 获取好友列表 (GET /friends)
+- **请求路径**：`GET WORKER_BASE_URL/friends`
+- **支持标签筛选**：`GET WORKER_BASE_URL/friends?tag=crypto`
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "friends": [
+      {
+        "id": "friend-rel-uuid-1",
+        "user_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+        "friend_id": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+        "friend_address": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+        "alias": "Bob (Devcon)",
+        "tags": ["crypto", "developer"],
+        "created_at": 1788587800000,
+        "updated_at": 1788587850000,
+        "public_metadata": {
+          "nickname": "Bob"
+        },
+        "avatar_url": "/users/0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2/avatar"
+      }
+    ]
+  }
+  ```
+
+#### 2. 添加好友 (POST /friends)
+- **请求路径**：`POST WORKER_BASE_URL/friends`
+- **请求体 (application/json)**：
+  ```json
+  {
+    "friend_address": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+    "alias": "Bob (Devcon)",
+    "tags": ["crypto", "developer"]
+  }
+  ```
+- **成功响应 (`HTTP 201`)**：返回新增的好友对象。
+
+#### 3. 获取好友详情 (GET /friends/:address)
+- **请求路径**：`GET WORKER_BASE_URL/friends/0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2`
+- **成功响应 (`HTTP 200`)**：返回该好友关系及最新公开资料。
+
+#### 4. 更新好友备注与标签 (PATCH /friends/:address)
+- **请求路径**：`PATCH WORKER_BASE_URL/friends/0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2`
+- **请求体 (application/json)**：
+  ```json
+  {
+    "alias": "Bob VIP",
+    "tags": ["vip", "crypto"]
+  }
+  ```
+- **成功响应 (`HTTP 200`)**：返回更新后的好友信息。
+
+#### 5. 覆盖更新好友标签 (PUT /friends/:address/tags)
+- **请求路径**：`PUT WORKER_BASE_URL/friends/0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2/tags`
+- **请求体 (application/json)**：
+  ```json
+  {
+    "tags": ["core-contributor"]
+  }
+  ```
+- **成功响应 (`HTTP 200`)**：返回更新后的好友信息。
+
+#### 6. 获取当前用户全部标签列表 (GET /friends/tags)
+- **请求路径**：`GET WORKER_BASE_URL/friends/tags`
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "tags": ["core-contributor", "crypto", "developer", "vip"]
+  }
+  ```
+
+#### 7. 删除好友 (DELETE /friends/:address)
+- **请求路径**：`DELETE WORKER_BASE_URL/friends/0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2`
+- **成功响应 (`HTTP 200`)**：`{"success": true}`
+
+### 14.2 黑名单系统与消息拒收拦截 (Blacklist)
+
+#### 1. 拒收与防御策略
+- 当用户 A 将用户 B 加入黑名单时：
+  - **会话创建拦截**：用户 B 若尝试创建与用户 A 的 1v1 私聊（`POST /conversations`），服务端直接返回 `HTTP 403 Forbidden` (`{"error": "Target user has blocked you"}`)。
+  - **消息发送拦截**：在已有的 1v1 私聊中，用户 B 尝试向用户 A 发送文本或多媒体消息（`POST /messages`、`/voice/upload`、`/images/upload`、`/files/upload`）时，服务端直接拦截并返回 `HTTP 403 Forbidden` (`{"error": "You cannot send messages to this user"}`)。
+
+#### 2. 获取黑名单列表 (GET /blacklist)
+- **请求路径**：`GET WORKER_BASE_URL/blacklist`
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "blacklist": [
+      {
+        "id": "block-uuid-1",
+        "user_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+        "blocked_id": "0x3e11223344556677889900aabbccddeeff001122",
+        "blocked_address": "0x3e11223344556677889900aabbccddeeff001122",
+        "reason": "Harassment and spam",
+        "created_at": 1788587800000,
+        "public_metadata": null,
+        "avatar_url": null
+      }
+    ]
+  }
+  ```
+
+#### 3. 添加黑名单 (POST /blacklist)
+- **请求路径**：`POST WORKER_BASE_URL/blacklist`
+- **请求体 (application/json)**：
+  ```json
+  {
+    "blocked_address": "0x3e11223344556677889900aabbccddeeff001122",
+    "reason": "Harassment and spam"
+  }
+  ```
+- **成功响应 (`HTTP 201`)**：返回拉黑记录对象。
+
+#### 4. 移除黑名单 (DELETE /blacklist/:address)
+- **请求路径**：`DELETE WORKER_BASE_URL/blacklist/0x3e11223344556677889900aabbccddeeff001122`
+- **成功响应 (`HTTP 200`)**：`{"success": true}`
+
+### 14.3 好友消息 @ 提及语法 (Mentions)
+
+发送文本或多媒体消息时，支持在请求体中附带 `mentions` 钱包地址数组：
+```json
+{
+  "conversation_id": "group:0x1610...:dao-chat",
+  "content": "Hey @0x2c3d... and @0x1610..., please review the proposal!",
+  "mentions": [
+    "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+    "0x1610725056c027d5ae4e2fce73bb925c82c59eaa"
+  ]
+}
+```
+服务端解析并存入消息的 `mentions` 字段中。接收端可通过比对 `message.mentions` 是否包含自身钱包地址，渲染高亮提及效果或触发特别提醒。
+
+---
+
+## 15. 前端 TypeScript 类型定义汇总
 
 可以直接复制到前端项目的 `src/types/chat.ts` 中：
 
@@ -1065,6 +1373,11 @@ setInterval(syncLoop, 3000);
 export interface User {
   id: string;
   wallet_address: string;
+  avatar_url?: string | null;
+  avatar_mime?: string | null;
+  avatar_updated_at?: number | null;
+  public_metadata?: Record<string, any> | null;
+  private_metadata?: Record<string, any> | null;
   created_at: number;
   updated_at: number;
 }
@@ -1108,7 +1421,7 @@ export interface Conversation {
   members?: ConversationMember[];
 }
 
-export type MessageType = "text" | "voice" | "image" | "file";
+export type MessageType = "text" | "voice" | "image" | "file" | "recalled";
 export type RetentionType = "permanent" | "on_read";
 export type MessageStatus = "pending" | "delivered" | "read" | "burned";
 
@@ -1153,6 +1466,9 @@ export interface Message {
   content: string | null;
   retention: RetentionType;
   status: MessageStatus;
+  burn_after_seconds?: number;
+  recalled_at?: number | null;
+  mentions?: string[];
   expires_at: number;
   delivered_at: number | null;
   read_at: number | null;
@@ -1160,6 +1476,30 @@ export interface Message {
   voice?: VoiceMetadata | null;
   image?: ImageMetadata | null;
   file?: FileMetadata | null;
+}
+
+export interface Friend {
+  id: string;
+  user_id: string;
+  friend_id: string;
+  friend_address: string;
+  alias: string | null;
+  tags: string[];
+  created_at: number;
+  updated_at: number;
+  public_metadata?: Record<string, any> | null;
+  avatar_url?: string | null;
+}
+
+export interface BlacklistEntry {
+  id: string;
+  user_id: string;
+  blocked_id: string;
+  blocked_address: string;
+  reason: string | null;
+  created_at: number;
+  public_metadata?: Record<string, any> | null;
+  avatar_url?: string | null;
 }
 
 export interface SyncResponse {
@@ -1171,7 +1511,7 @@ export interface SyncResponse {
 
 ---
 
-## 13. 完整前端集成示例代码 (TypeScript SDK)
+## 16. 完整前端集成示例代码 (TypeScript SDK)
 
 基于原生 `fetch` 与 `viem`（或 `ethers.js`），支持即拷即用的轻量客户端封装：
 
@@ -1184,6 +1524,8 @@ import type {
   VoiceMetadata,
   ImageMetadata,
   FileMetadata,
+  Friend,
+  BlacklistEntry,
   SyncResponse
 } from "./types/chat";
 
@@ -1337,7 +1679,12 @@ export class Web3ChatClient {
   public async sendTextMessage(
     conversationId: string,
     content: string,
-    options?: { retention?: "permanent" | "on_read"; expiresInSeconds?: number }
+    options?: {
+      retention?: "permanent" | "on_read";
+      expiresInSeconds?: number;
+      burnAfterSeconds?: number;
+      mentions?: string[];
+    }
   ): Promise<Message> {
     return this.request<Message>(`/conversations/${conversationId}/messages`, {
       method: "POST",
@@ -1346,6 +1693,8 @@ export class Web3ChatClient {
         type: "text",
         retention: options?.retention || "permanent",
         expires_in_seconds: options?.expiresInSeconds,
+        burn_after_seconds: options?.burnAfterSeconds,
+        mentions: options?.mentions,
       }),
     });
   }
@@ -1543,6 +1892,142 @@ export class Web3ChatClient {
       limit: limit.toString(),
     });
     return this.request<SyncResponse>(`/sync?${params.toString()}`);
+  }
+
+  // ==================== 10. 用户双重元数据与唯一头像 ====================
+
+  /** 获取当前登录用户完整资料（包含 private_metadata） */
+  public async getMyProfile(): Promise<{ user: User }> {
+    return this.request<{ user: User }>("/users/me");
+  }
+
+  /** 更新当前用户双重元数据（支持局部更新） */
+  public async updateMyMetadata(data: {
+    public_metadata?: Record<string, any>;
+    private_metadata?: Record<string, any>;
+  }): Promise<{ user: User }> {
+    return this.request<{ user: User }>("/users/me/metadata", {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** 上传/更换用户唯一头像（自动删除旧头像） */
+  public async uploadAvatar(
+    avatarBlob: Blob,
+    mimeType = "image/png"
+  ): Promise<{ success: boolean; avatar_url: string; avatar_mime: string; avatar_updated_at: number }> {
+    const formData = new FormData();
+    formData.append("avatar", avatarBlob, "avatar");
+    return this.request("/users/me/avatar", {
+      method: "POST",
+      body: formData,
+    });
+  }
+
+  /** 获取指定用户公开资料（不包含 private_metadata） */
+  public async getUserProfile(addressOrId: string): Promise<{ user: User }> {
+    return this.request<{ user: User }>(`/users/${addressOrId}`);
+  }
+
+  /** 获取用户头像直接访问链接 */
+  public getUserAvatarUrl(addressOrId: string): string {
+    return `${this.baseUrl}/users/${addressOrId}/avatar`;
+  }
+
+  // ==================== 11. 消息30秒撤回 ====================
+
+  /** 发送方在30秒内撤回消息（立即物理删除其多媒体对象） */
+  public async recallMessage(messageId: string): Promise<{ success: boolean; message_id: string; recalled_at: number }> {
+    return this.request(`/messages/${messageId}/recall`, {
+      method: "POST",
+    });
+  }
+
+  // ==================== 12. 好友与标签模块 ====================
+
+  /** 获取好友列表（支持按标签筛选） */
+  public async getFriends(tag?: string): Promise<{ friends: Friend[] }> {
+    const params = new URLSearchParams();
+    if (tag) params.set("tag", tag);
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request<{ friends: Friend[] }>(`/friends${query}`);
+  }
+
+  /** 添加好友（支持备注与标签） */
+  public async addFriend(
+    friendAddress: string,
+    options?: { alias?: string; tags?: string[] }
+  ): Promise<Friend> {
+    return this.request<Friend>("/friends", {
+      method: "POST",
+      body: JSON.stringify({
+        friend_address: friendAddress,
+        alias: options?.alias,
+        tags: options?.tags,
+      }),
+    });
+  }
+
+  /** 获取好友详情 */
+  public async getFriend(friendAddress: string): Promise<Friend> {
+    return this.request<Friend>(`/friends/${friendAddress}`);
+  }
+
+  /** 更新好友备注或标签 */
+  public async updateFriend(
+    friendAddress: string,
+    data: { alias?: string; tags?: string[] }
+  ): Promise<Friend> {
+    return this.request<Friend>(`/friends/${friendAddress}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** 覆盖更新好友标签 */
+  public async setFriendTags(friendAddress: string, tags: string[]): Promise<Friend> {
+    return this.request<Friend>(`/friends/${friendAddress}/tags`, {
+      method: "PUT",
+      body: JSON.stringify({ tags }),
+    });
+  }
+
+  /** 获取当前用户所有好友使用过的去重标签列表 */
+  public async getAllFriendTags(): Promise<{ tags: string[] }> {
+    return this.request<{ tags: string[] }>("/friends/tags");
+  }
+
+  /** 删除好友 */
+  public async removeFriend(friendAddress: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/friends/${friendAddress}`, {
+      method: "DELETE",
+    });
+  }
+
+  // ==================== 13. 黑名单模块 ====================
+
+  /** 获取黑名单列表 */
+  public async getBlacklist(): Promise<{ blacklist: BlacklistEntry[] }> {
+    return this.request<{ blacklist: BlacklistEntry[] }>("/blacklist");
+  }
+
+  /** 拉黑指定用户 */
+  public async blockUser(blockedAddress: string, reason?: string): Promise<BlacklistEntry> {
+    return this.request<BlacklistEntry>("/blacklist", {
+      method: "POST",
+      body: JSON.stringify({
+        blocked_address: blockedAddress,
+        reason,
+      }),
+    });
+  }
+
+  /** 移出黑名单 */
+  public async unblockUser(blockedAddress: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/blacklist/${blockedAddress}`, {
+      method: "DELETE",
+    });
   }
 }
 

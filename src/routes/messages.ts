@@ -7,6 +7,7 @@ import {
   acknowledgeDelivery,
   acknowledgeRead,
   getMessageReceipts,
+  recallMessage,
   type SendMessageOptions,
 } from '../services/messages';
 
@@ -28,7 +29,7 @@ messageRoutes.post('/conversations/:id/messages', async (c) => {
     const message = await sendMessage(c.env.DB, conversationId, user.id, body);
     return c.json(message, 201);
   } catch (err: any) {
-    const status = err.message.includes('Unauthorized') ? 403 : 400;
+    const status = err.message.includes('Unauthorized') || err.message.includes('blocked') ? 403 : 400;
     return c.json({ error: err.message }, status);
   }
 });
@@ -121,9 +122,31 @@ messageRoutes.post('/messages/:id/read', async (c) => {
       success: true,
       message_id: messageId,
       status: isBurned ? 'burned' : 'read',
+      burn_after_seconds: isBurned ? (result.burn_windows?.[messageId] ?? 30) : undefined,
     });
   } catch (err: any) {
     return c.json({ error: err.message }, 500);
+  }
+});
+
+// Recall message (within configurable window, default 30s)
+messageRoutes.post('/messages/:id/recall', async (c) => {
+  try {
+    const user = c.get('user');
+    const messageId = c.req.param('id');
+    const windowSeconds = c.env.MESSAGE_RECALL_WINDOW_SECONDS
+      ? Number(c.env.MESSAGE_RECALL_WINDOW_SECONDS)
+      : 30;
+
+    const result = await recallMessage(c.env.DB, c.env.VOICE_BUCKET, user.id, messageId, windowSeconds);
+    return c.json(result);
+  } catch (err: any) {
+    const status = err.message.includes('Unauthorized')
+      ? 403
+      : err.message.includes('not found')
+      ? 404
+      : 400;
+    return c.json({ error: err.message }, status);
   }
 });
 

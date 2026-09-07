@@ -18,15 +18,38 @@ export async function sweepExpiredMessages(
   let deletedImageObjects = 0;
   let deletedFileObjects = 0;
 
+  // Subquery condition for expired messages OR completed burn-on-read messages past viewing window
+  const expiredFilter = `
+    m.expires_at <= ?
+    OR (
+      m.retention = 'on_read'
+      AND (
+        SELECT COUNT(*) FROM conversation_members cm
+        WHERE cm.conversation_id = m.conversation_id AND cm.user_id != m.sender_id
+      ) > 0
+      AND (
+        SELECT COUNT(DISTINCT mr.user_id) FROM message_receipts mr
+        WHERE mr.message_id = m.id AND mr.status = 'read'
+      ) >= (
+        SELECT COUNT(*) FROM conversation_members cm
+        WHERE cm.conversation_id = m.conversation_id AND cm.user_id != m.sender_id
+      )
+      AND (
+        SELECT MAX(mr.timestamp) FROM message_receipts mr
+        WHERE mr.message_id = m.id AND mr.status = 'read'
+      ) <= (? - (COALESCE(m.burn_after_seconds, 30) * 1000))
+    )
+  `;
+
   if (r2) {
     // 1. Find expired voice messages so we can remove objects from R2
     const voiceRowsRes = await db.prepare(`
       SELECT vm.object_key, vm.message_id
       FROM voice_messages vm
       JOIN messages m ON m.id = vm.message_id
-      WHERE m.expires_at <= ?
+      WHERE ${expiredFilter}
       LIMIT ?
-    `).bind(now, batchSize).all<{ object_key: string; message_id: string }>();
+    `).bind(now, now, batchSize).all<{ object_key: string; message_id: string }>();
 
     for (const v of voiceRowsRes.results ?? []) {
       try {
@@ -42,9 +65,9 @@ export async function sweepExpiredMessages(
       SELECT im.object_key, im.message_id
       FROM image_messages im
       JOIN messages m ON m.id = im.message_id
-      WHERE m.expires_at <= ?
+      WHERE ${expiredFilter}
       LIMIT ?
-    `).bind(now, batchSize).all<{ object_key: string; message_id: string }>();
+    `).bind(now, now, batchSize).all<{ object_key: string; message_id: string }>();
 
     for (const img of imageRowsRes.results ?? []) {
       try {
@@ -60,9 +83,9 @@ export async function sweepExpiredMessages(
       SELECT fm.object_key, fm.message_id
       FROM file_messages fm
       JOIN messages m ON m.id = fm.message_id
-      WHERE m.expires_at <= ?
+      WHERE ${expiredFilter}
       LIMIT ?
-    `).bind(now, batchSize).all<{ object_key: string; message_id: string }>();
+    `).bind(now, now, batchSize).all<{ object_key: string; message_id: string }>();
 
     for (const f of fileRowsRes.results ?? []) {
       try {
@@ -78,9 +101,9 @@ export async function sweepExpiredMessages(
   const deleteRes = await db.prepare(`
     DELETE FROM messages
     WHERE id IN (
-      SELECT id FROM messages WHERE expires_at <= ? LIMIT ?
+      SELECT m.id FROM messages m WHERE ${expiredFilter} LIMIT ?
     )
-  `).bind(now, batchSize).run();
+  `).bind(now, now, batchSize).run();
 
   const purgedCount = deleteRes.meta?.changes ?? 0;
 

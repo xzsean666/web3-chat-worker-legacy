@@ -192,7 +192,17 @@ describe('End-to-End Integration Suite', () => {
     const charlieReadData = (await charlieReadRes.json()) as any;
     expect(charlieReadData.status).toBe('burned'); // Burned for Charlie!
 
-    // Charlie attempts to download again -> rejected with 404 (burned for Charlie)
+    // Charlie can still download within 30s viewing window
+    const charlieRepeatWithin30s = await app.request(`/voice/${voiceMsgId}`, {
+      headers: { Authorization: `Bearer ${charlie.token}` },
+    }, env);
+    expect(charlieRepeatWithin30s.status).toBe(200);
+
+    // After 35s (> 30s), Charlie download is rejected with 404
+    const oldReadTime = Date.now() - 35000;
+    await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND user_id = ? AND status = 'read'")
+      .bind(oldReadTime, voiceMsgId, charlie.user.id).run();
+
     const charlieRepeatDownload = await app.request(`/voice/${voiceMsgId}`, {
       headers: { Authorization: `Bearer ${charlie.token}` },
     }, env);
@@ -228,6 +238,14 @@ describe('End-to-End Integration Suite', () => {
     expect(bobReadRes.status).toBe(200);
     const bobReadData = (await bobReadRes.json()) as any;
     expect(bobReadData.status).toBe('burned');
+
+    // Bob still has 30s viewing window
+    expect(r2.hasKey(voiceKey)).toBe(true);
+
+    // After 30s viewing window elapses, cleanup sweeper purges from R2 and D1
+    await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND user_id = ? AND status = 'read'")
+      .bind(oldReadTime, voiceMsgId, bob.user.id).run();
+    await app.request('/admin/cleanup', { method: 'POST' }, env);
 
     // Dual-Storage Destruction verification:
     // 1) Audio binary removed from R2

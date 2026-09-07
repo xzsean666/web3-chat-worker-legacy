@@ -4,7 +4,7 @@
 Build a high-performance, single-node Cloudflare Worker Web3 Chat MVP supporting EVM wallet signature login, direct/group chat, text and voice messaging, explicit delivery ACK, burn-on-read, voice destruction (R2), and incremental sync.
 
 ## Current Task
-TASK-013: Image & File Messaging Support with Dual-Storage R2 Upload, Download & Destruction
+TASK-016: Social System: Friends List, Friend Tagging & Blacklist Enforcement
 
 ## Current Status
 DONE
@@ -15,7 +15,7 @@ DONE
 - Documented project goal in `docs/AI/GOAL.md`.
 - Defined architecture, D1 schema, and incremental sync protocols in `docs/AI/ARCHITECTURE.md`.
 - Recorded architectural decisions in `docs/AI/DECISIONS.md`.
-- Outlined task breakdown in `docs/AI/TASK_INDEX.md` and detailed specs in `docs/AI/tasks/TASK-001.md` through `TASK-013.md`.
+- Outlined task breakdown in `docs/AI/TASK_INDEX.md` and detailed specs in `docs/AI/tasks/TASK-001.md` through `TASK-016.md`.
 - Initialized `package.json`, configured `pnpm`, installed `hono`, `viem`, `wrangler`, `vitest`, and `@cloudflare/workers-types`.
 - Configured `tsconfig.json` for Cloudflare Worker runtime.
 - Configured `wrangler.jsonc` with D1 `DB` binding, R2 `VOICE_BUCKET` binding, and scheduled cron triggers.
@@ -82,51 +82,71 @@ DONE
 - TASK-013: Added `enrichMessagesWithMedia` in `src/services/messages.ts`, automatically attaching media metadata to messages in cursor pagination and incremental `/sync`.
 - TASK-013: Created `test/images.test.ts` (6 tests) and `test/files.test.ts` (6 tests), updated `test/db.test.ts`, `test/cleanup.test.ts`, and `test/e2e.test.ts`.
 - TASK-013: Documented ADR-009 in `docs/AI/DECISIONS.md`, updated `docs/AI/ARCHITECTURE.md`, `README.md`, and `docs/FRONTEND_INTEGRATION.md` with full TypeScript SDK methods.
+- TASK-014: Created `migrations/0004_user_social_and_message_features.sql` with `public_metadata`, `private_metadata`, `avatar_key`, `avatar_mime`, `avatar_updated_at` columns on `users`.
+- TASK-014: Implemented `src/services/users.ts` and `src/routes/users.ts` (`GET /users/me`, `PATCH /users/me/metadata`, `POST /users/me/avatar`, `GET /users/:address`, `GET /users/:address/avatar`) with single avatar constraint (auto-deletion of previous R2 avatar).
+- TASK-014: Created `test/users.test.ts` (5 tests passing).
+- TASK-015: Implemented 30s message recall (`POST /messages/:id/recall`, `src/services/messages.ts`) with immediate R2 media asset purging (`destroyMediaOnly`).
+- TASK-015: Implemented 30-second minimum viewing window for `on_read` messages in queries (`getConversationMessages`, `getSyncUpdates`), media streaming guards (`src/services/voice.ts`, `src/services/images.ts`, `src/services/files.ts`), and deferred physical destruction (`acknowledgeRead`, `sweepExpiredMessages`).
+- TASK-015: Created `test/recall_and_burn.test.ts` (4 tests passing) and updated existing test suites.
+- TASK-016: Created `friends` and `blacklist` tables in migration 0004.
+- TASK-016: Implemented `src/services/social.ts` and `src/routes/social.ts` (`/friends`, `/friends/tags`, `/blacklist`) with tag filtering and custom aliases.
+- TASK-016: Enforced blacklist blocking in `getOrCreateDirectConversation` and `sendMessage` (HTTP 403 Forbidden). Added `mentions` support in messages.
+- TASK-016: Created `test/social.test.ts` (3 tests passing).
+- TASK-016: Documented ADR-010 in `docs/AI/DECISIONS.md`, updated `docs/AI/ARCHITECTURE.md`, `README.md`, and completely updated `docs/FRONTEND_INTEGRATION.md` with TypeScript SDK methods and types.
 
 ## Modified Files
-- `migrations/0001_initial_schema.sql`
-- `migrations/0003_media_messages.sql`
+- `migrations/0004_user_social_and_message_features.sql`
 - `src/db/schema.ts`
 - `src/types.ts`
-- `src/services/images.ts`
-- `src/services/files.ts`
-- `src/services/voice.ts`
+- `src/services/users.ts`
+- `src/routes/users.ts`
+- `src/services/social.ts`
+- `src/routes/social.ts`
+- `src/services/messages.ts`
+- `src/routes/messages.ts`
+- `src/services/conversations.ts`
 - `src/services/destruction.ts`
 - `src/services/cleanup.ts`
-- `src/services/messages.ts`
-- `src/routes/images.ts`
-- `src/routes/files.ts`
-- `src/routes/voice.ts`
+- `src/services/voice.ts`
+- `src/services/images.ts`
+- `src/services/files.ts`
 - `src/index.ts`
+- `test/users.test.ts`
+- `test/recall_and_burn.test.ts`
+- `test/social.test.ts`
+- `test/db.test.ts`
+- `test/receipts.test.ts`
+- `test/voice.test.ts`
 - `test/images.test.ts`
 - `test/files.test.ts`
-- `test/db.test.ts`
-- `test/cleanup.test.ts`
 - `test/e2e.test.ts`
 - `scripts/live-e2e.ts`
 - `docs/FRONTEND_INTEGRATION.md`
+- `README.md`
 - `docs/AI/ARCHITECTURE.md`
 - `docs/AI/DECISIONS.md`
-- `README.md`
-- `docs/AI/tasks/TASK-013.md`
+- `docs/AI/tasks/TASK-014.md`
+- `docs/AI/tasks/TASK-015.md`
+- `docs/AI/tasks/TASK-016.md`
 - `docs/AI/TASK_INDEX.md`
 - `docs/AI/SESSION_STATE.md`
 
 ## Verification Commands & Results
 - `pnpm run typecheck`: Success (zero type errors across all source and test files).
-- `pnpm test`: Success (58/58 tests passing across 11 test suites with 100% pass rate).
-- `pnpm wrangler d1 migrations apply DB --remote`: Success (0003_media_messages.sql executed on remote D1).
-- `pnpm wrangler deploy`: Success (deployed to Cloudflare Workers).
-- `pnpm run test:live`: Success (12/12 live integration steps passed against remote Cloudflare Worker & D1/R2).
+- `pnpm test`: Success (70/70 tests passing across 14 test suites with 100% pass rate).
+- `pnpm wrangler d1 migrations apply web3_chat_db --remote`: Successfully applied migration `0004_user_social_and_message_features.sql`.
+- `pnpm wrangler deploy`: Successfully deployed to Cloudflare Worker (Version `4a95a98e-3ecc-41e8-ae9e-1acf4948c1a0`).
+- `pnpm run test:live`: Success (16/16 steps passed against live production endpoint `https://web3-chat-worker.002788.xyz` covering Auth, 1:1 Chat, Group RBAC, Voice/Image/File upload & streaming, 30s burn-on-read grace window, batch ACK, TTL cleanup, dual-metadata & avatar, 30s recall with R2 purge, social friends & tags, blacklist enforcement & 403 chat rejection, and session logout).
 
 ## Unresolved Issues
 None.
 
 ## Risks and Assumptions
-- R2 uploads share the bucket binding (`VOICE_BUCKET`) under prefixes `images/` and `files/`, ensuring zero-config backward compatibility with Cloudflare deployment bindings.
+- Message recall window default is 30 seconds, configurable via `MESSAGE_RECALL_WINDOW_SECONDS` environment variable.
+- Burn-on-read minimum viewing window default is 30 seconds, configurable via `burn_after_seconds` per message.
 
 ## Next Task
-Frontend integration & client SDK release.
+Frontend integration & deployment verification.
 
 ## Next Session Read Files
 - `README.md`
@@ -134,4 +154,5 @@ Frontend integration & client SDK release.
 - `docs/AI/ARCHITECTURE.md`
 - `docs/AI/DECISIONS.md`
 - `docs/AI/SESSION_STATE.md`
+
 

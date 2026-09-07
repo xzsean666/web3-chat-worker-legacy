@@ -227,6 +227,18 @@ describe('Image Message Storage (R2) & Synchronized Cleanup', () => {
     const readData = (await readRes.json()) as any;
     expect(readData.status).toBe('burned');
 
+    // Bob can still download image within 30s viewing window
+    const downloadWithin30s = await app.request(`/images/${msgId}`, {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    expect(downloadWithin30s.status).toBe(200);
+
+    // After 30s viewing window elapses, sweeper purges D1 and R2
+    const oldTimestamp = Date.now() - 35000;
+    await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND status = 'read'")
+      .bind(oldTimestamp, msgId).run();
+    await app.request('/admin/cleanup', { method: 'POST' }, env);
+
     // Verify D1 records deleted
     const msgInDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msgId).first();
     expect(msgInDb).toBeNull();
@@ -274,7 +286,17 @@ describe('Image Message Storage (R2) & Synchronized Cleanup', () => {
     expect(bobRead.status).toBe(200);
     expect((await bobRead.json() as any).status).toBe('burned');
 
-    // Bob cannot download again (burned for Bob)
+    // Bob can still download within 30s viewing window
+    const bobRepeatWithin30s = await app.request(`/images/${msgId}`, {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    expect(bobRepeatWithin30s.status).toBe(200);
+
+    // After 35s (> 30s), Bob cannot download again (burned for Bob)
+    const oldReadTime = Date.now() - 35000;
+    await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND user_id = ? AND status = 'read'")
+      .bind(oldReadTime, msgId, bobUser.id).run();
+
     const bobRepeat = await app.request(`/images/${msgId}`, {
       headers: { Authorization: `Bearer ${bobToken}` },
     }, env);
@@ -295,7 +317,14 @@ describe('Image Message Storage (R2) & Synchronized Cleanup', () => {
     }, env);
     expect(charlieRead.status).toBe(200);
 
-    // Now all recipients have read -> R2 and D1 completely purged
+    // Charlie still has 30s viewing window
+    expect(r2.hasKey(objectKey)).toBe(true);
+
+    // After Charlie's 30s viewing window elapses, sweeper purges from R2 and D1
+    await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND user_id = ? AND status = 'read'")
+      .bind(oldReadTime, msgId, charlieUser.id).run();
+    await app.request('/admin/cleanup', { method: 'POST' }, env);
+
     expect(r2.hasKey(objectKey)).toBe(false);
     const d1Msg = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msgId).first();
     expect(d1Msg).toBeNull();

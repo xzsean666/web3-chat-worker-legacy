@@ -29,7 +29,8 @@ conversationRoutes.post('/', async (c) => {
     const conversation = await getOrCreateDirectConversation(c.env.DB, user.id, target);
     return c.json(conversation, 201);
   } catch (err: any) {
-    return c.json({ error: err.message }, err.message.includes('not found') ? 404 : 400);
+    const status = err.message.includes('blocked') ? 403 : err.message.includes('not found') ? 404 : 400;
+    return c.json({ error: err.message }, status);
   }
 });
 

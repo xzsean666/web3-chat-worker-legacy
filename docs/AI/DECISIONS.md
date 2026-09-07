@@ -73,3 +73,15 @@
   5. **Streaming & Content Disposition**: `GET /images/:messageId` serves inline binary streaming; `GET /files/:messageId` serves attachment binary streaming with RFC 5987 / RFC 6266 unicode filename handling. Dedicated `/meta` endpoints provide JSON metadata inspection.
   6. **Sync Enrichment**: Automatically enrich messages returned by `/conversations/:id/messages` and `/sync` with media metadata (`voice`, `image`, `file`) to eliminate extra client round-trips.
 - **Consequences**: High-performance, secure image and file sharing is fully unified with Web3 authentication, explicit ACKs, burn-on-read, and incremental sync.
+
+## ADR-010: User Dual-Metadata, Single Avatar Storage, 30s Message Recall, 30s Burn Grace Window, and Social Graph Protections
+- **Status**: Accepted
+- **Context**: The application required user profiles with dual public/private metadata, single avatar management in Cloudflare R2, a 30-second window for message recall with immediate media asset purging, a minimum 30-second viewing window for burn-on-read messages upon reading, and social relationships (friends with tags/aliases, blacklist with direct message blocking).
+- **Decision**:
+  1. **Dual-Metadata Model**: Added `public_metadata` and `private_metadata` JSON columns to `users`. Both are editable only by the user (`PATCH /users/me/metadata`). Others can read `public_metadata` (`GET /users/:address`), while `private_metadata` is strictly private to the authenticated owner (`GET /users/me`).
+  2. **Single Avatar Invariance**: User avatars are stored in R2. Uploading a new avatar (`POST /users/me/avatar`) overwrites/deletes the previous R2 object to guarantee each user has at most one active avatar, publicly streamable via `GET /users/:address/avatar`.
+  3. **30-Second Message Recall**: Senders can recall messages within 30 seconds (`MESSAGE_RECALL_WINDOW_SECONDS`, default 30s). The backend marks `recalled_at`, masks content to `"This message was recalled"`, and immediately physically purges any R2 binary object associated with the message.
+  4. **Burn-on-Read 30s Viewing Grace Window**: Reading an `on_read` message returns `{ status: "burned", burn_after_seconds: 30 }`. Senders/recipients specify `burn_after_seconds` (default 30s). Exclusion from sync/message queries and media downloads is delayed by `burn_after_seconds` after read receipt timestamp, ensuring readers have at least 30 seconds to view/download media before removal and physical destruction.
+  5. **Social Graph & Blacklist Enforcement**: Created `friends` (with `alias` and JSON `tags` array) and `blacklist` tables. When user B has blocked user A, user A cannot initiate a 1:1 chat or send messages to user B (returns HTTP 403 Forbidden). Messages support optional `@mentions`.
+- **Consequences**: User customization and social features are fully integrated into the existing Cloudflare Worker architecture without compromising ephemeral privacy or storage efficiency.
+

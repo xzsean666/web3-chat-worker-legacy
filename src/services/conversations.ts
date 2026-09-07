@@ -21,11 +21,16 @@ export async function findOrCreateUser(db: D1Database, identifier: string): Prom
     if (!user) {
       const now = Date.now();
       await db.prepare(
-        'INSERT OR IGNORE INTO users (id, wallet_address, created_at, updated_at) VALUES (?, ?, ?, ?)'
-      ).bind(addr, addr, now, now).run();
+        'INSERT OR IGNORE INTO users (id, wallet_address, public_metadata, private_metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+      ).bind(addr, addr, '{}', '{}', now, now).run();
       user = {
         id: addr,
         wallet_address: addr,
+        public_metadata: '{}',
+        private_metadata: '{}',
+        avatar_key: null,
+        avatar_mime: null,
+        avatar_updated_at: null,
         created_at: now,
         updated_at: now,
       };
@@ -54,6 +59,15 @@ export async function getOrCreateDirectConversation(
 
   if (targetUser.id === currentUserId) {
     throw new Error('Cannot create direct conversation with yourself');
+  }
+
+  // Check if target user has blocked current user
+  const isBlocked = await db.prepare(
+    'SELECT 1 FROM blacklist WHERE user_id = ? AND blocked_address = ?'
+  ).bind(targetUser.id, currentUserId).first();
+
+  if (isBlocked) {
+    throw new Error('Cannot start conversation: you have been blocked by this user');
   }
 
   // Deterministic Direct Conversation ID: direct:min:max
