@@ -96,7 +96,7 @@ imageRoutes.post('/upload', async (c) => {
 
     return c.json(result, 201);
   } catch (err: any) {
-    const status = err.message.includes('Unauthorized') ? 403 : 400;
+    const status = err.message.includes('Unauthorized') || err.message.includes('muted') ? 403 : 400;
     return c.json({ error: err.message }, status);
   }
 });

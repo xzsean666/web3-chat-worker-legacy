@@ -298,14 +298,19 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
 
 ---
 
-## 5. 模块三：主权群聊管理 (Sovereign Groups)
+## 5. 模块三：主权群聊管理、群元数据与管控系统 (Sovereign Groups, Metadata & Moderation)
 
-系统采用 **Web3 自主权群组（Sovereign Groups）** 架构：
+系统采用 **Web3 自主权群组（Sovereign Groups）** 架构，并集成 **群元数据系统（Group Metadata）** 与 **细粒度禁言管控系统（Moderation & Mute）**：
 
 - **群 ID 规范**：格式为 `${owner_address}:${slug}`（例如 `0xa284...:buidlers`）。群 ID 与创建者钱包地址永久强绑定。
-- **单主权管理模型**：一个群永久属于创建者（`owner`），**群主不可移交**。只有群主有权修改群名、邀请成员、移除成员；其他成员仅有权在群内发言及主动退群。这保证了跨节点合并数据时永远不会发生权限冲突。
+- **三级角色权限控制（RBAC）**：
+  - **群主 (`owner`)**：群的绝对所有者，不可转让。拥有修改群名/群介绍/跑马灯、委任/撤销管理员、踢除任何成员、开启全员禁言、禁言单人、解散群聊的最高特权。
+  - **管理员 (`admin`)**：由群主委任。拥有修改群名/群介绍/跑马灯、邀请成员、踢除普通成员、开启全员禁言、禁言普通成员的特权。**最重要特性：管理员始终拥有发言权（`admin始终可以讲话`）**，不受任何全员禁言或个人禁言限制！
+  - **普通成员 (`member`)**：可参与聊天、读取元数据、主动退群。禁言开启时无法发言。
 
-### 5.1 创建主权群聊
+---
+
+### 5.1 创建主权群聊 (含初始介绍与滚动播放配置)
 
 - **接口路径**：`POST WORKER_BASE_URL/groups`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
@@ -314,62 +319,176 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
   ```json
   {
     "name": "Web3 BUIDLers DAO",
+    "description": "欢迎加入 Web3 开发者联盟！本群致力于去中心化通信与应用研发。",
+    "announcement": "公告：周五晚 8 点举行线上产品演示会，请所有核心成员准时参加！",
+    "marquee": {
+      "enabled": true,
+      "text": "欢迎加入 Web3 开发者联盟！周五晚 8 点线上产品演示会，不见不散！",
+      "speed": 50
+    },
     "member_ids": [
       "0x3162ad998c5df9376b6700f379816dc71c9ebf28",
       "0x10b0da00e5319fbcf1e494de53874c8a23aecb55"
     ],
-    "slug": "buidlers" // 可选自定义标识符，默认由后端自动生成 8 位随机 hex
+    "slug": "buidlers"
   }
   ```
 
-  - `member_ids`：可选的初始成员钱包地址列表。创建者默认加入并拥有不可转让的 `owner` 角色。
-- **成功响应 (`HTTP 201`)**：返回新建群会话详情，ID 为 `0xcreatorAddress:slug`。
+  - `name`（必填）：群名称（将自动保存在 `metadata.name` 中并与数据表同步）。
+  - `description`（选填，需求②）：群介绍文本（保存在 `metadata.description`）。
+  - `announcement`（选填）：群公告文本（保存在 `metadata.announcement`）。
+  - `marquee`（选填，需求③）：群顶部滚动播放介绍内容配置：
+    - `enabled` (boolean)：是否开启顶部滚动横幅。
+    - `text` (string，可选)：滚动播放文本（若不指定，前端可默认回退显示 `description`）。
+    - `speed` (number，可选)：滚动速度（毫秒/帧率，如 50）。
+  - `metadata`（选填）：支持前端挂载任意自定义 JSON 属性。
+  - `member_ids`（选填）：初始成员钱包地址列表。
+  - `slug`（选填）：自定义群后缀，默认自动生成随机 8 位 hex。
+- **成功响应 (`HTTP 201`)**：返回新建群完整详情，包含已解析的 `metadata` 对象。
 
-### 5.2 修改群聊名称
+---
 
-- **接口路径**：`PATCH WORKER_BASE_URL/groups/:id`
+### 5.2 修改群名称、群介绍与顶部滚动播放配置 (需求 ①、②、③)
+
+> **【前端对接核心说明】**：
+> 1. **修改群名称 (①)**：群名称存放于群的 `metadata.name` 中，后端自动将其与数据表底层 `conversations.name` 保持严格双向同步。在修改时，入参无论是通过根路径 `name` 还是通过 `metadata.name` 传递，后端均一并更新！
+> 2. **添加/修改群介绍 (②)**：群介绍存放于群的 `metadata.description` 中。
+> 3. **群顶部滚动播放群介绍内容 (③)**：滚动播放状态与文字存放于群的 `metadata.marquee` 中。前端群聊窗口顶部应根据 `metadata.marquee.enabled` 决定是否渲染跑马灯横幅。
+> 4. **权限控制**：仅群主 (`owner`) 与管理员 (`admin`) 有权修改群信息与元数据，普通成员调用直接拦截并返回 `HTTP 403 Forbidden`。
+
+- **接口路径**：`PATCH WORKER_BASE_URL/groups/:id`（或 `PATCH WORKER_BASE_URL/groups/:id/metadata`）
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
-- **权限要求**：**仅群主（`owner`）有权修改**，其他成员调用直接返回 `HTTP 403`。
 - **请求体 (Content-Type: application/json)**：
+
   ```json
   {
-    "name": "Web3 Super Builders"
+    "name": "Web3 BUIDLers Hub (V2)",
+    "description": "全球 Web3 极客与 BUIDLer 社区，分享最新 Alpha 与技术干货！",
+    "announcement": "置顶：最新合约审计报告已发布于资源池。",
+    "marquee": {
+      "enabled": true,
+      "text": "🎉 全球 Web3 极客与 BUIDLer 社区：最新合约审计报告已通过，欢迎查阅！",
+      "speed": 40
+    },
+    "metadata": {
+      "theme_color": "#3B82F6"
+    }
   }
   ```
-- **成功响应 (`HTTP 200`)**：返回更新后的群详情对象。
 
-### 5.3 添加群成员
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "id": "0xcreatorAddress:buidlers",
+    "type": "group",
+    "owner_address": "0xcreatorAddress",
+    "name": "Web3 BUIDLers Hub (V2)",
+    "metadata": {
+      "name": "Web3 BUIDLers Hub (V2)",
+      "description": "全球 Web3 极客与 BUIDLer 社区，分享最新 Alpha 与技术干货！",
+      "announcement": "置顶：最新合约审计报告已发布于资源池。",
+      "marquee": {
+        "enabled": true,
+        "text": "🎉 全球 Web3 极客与 BUIDLer 社区：最新合约审计报告已通过，欢迎查阅！",
+        "speed": 40
+      },
+      "theme_color": "#3B82F6"
+    },
+    "is_muted": false,
+    "mute_until": null,
+    "my_role": "owner",
+    "my_is_muted": false,
+    "members": [ ... ],
+    "created_at": 1788587860000,
+    "updated_at": 1788587890000
+  }
+  ```
 
+#### 前端顶部滚动横幅 (跑马灯) 渲染示例代码 (React / Vue)
+
+前端进入群聊详情页面后，从 `conversation.metadata` 获取 `marquee` 与 `description`：
+
+```tsx
+// React 组件示例：群顶部滚动播放横幅
+import React from 'react';
+
+interface GroupBannerProps {
+  metadata?: {
+    description?: string;
+    marquee?: {
+      enabled?: boolean;
+      text?: string;
+      speed?: number;
+    };
+  };
+}
+
+export const GroupTopMarqueeBanner: React.FC<GroupBannerProps> = ({ metadata }) => {
+  const marquee = metadata?.marquee;
+  // 如果开启了滚动播放，优先展示 marquee.text，缺省时展示群介绍 description
+  if (!marquee?.enabled) return null;
+
+  const content = marquee.text || metadata?.description || '';
+  if (!content) return null;
+
+  return (
+    <div className="w-full bg-blue-50 border-b border-blue-200 text-blue-800 px-4 py-2 flex items-center overflow-hidden">
+      <span className="mr-2 font-semibold text-xs uppercase tracking-wider bg-blue-600 text-white px-1.5 py-0.5 rounded">
+        群介绍
+      </span>
+      <marquee className="text-sm font-medium" scrollamount={marquee.speed ? marquee.speed / 10 : 5}>
+        {content}
+      </marquee>
+    </div>
+  );
+};
+```
+
+---
+
+### 5.3 群成员管理：邀请、踢人与退群 (需求 ④、⑤)
+
+#### 5.3.1 添加群成员
 - **接口路径**：`POST WORKER_BASE_URL/groups/:id/members`
-- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
-- **权限要求**：**仅群主（`owner`）有权邀请新成员**。
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`（仅群主/管理员可操作）
 - **请求体 (Content-Type: application/json)**：
-  支持通过 `wallet_address` 或 `user_id`（均统一为小写 0x 地址）：
   ```json
   {
     "wallet_address": "0x41a0706a3636ce383a69054f52b46ac980743a1d"
   }
   ```
-- **成功响应 (`HTTP 201`)**：
+- **成功响应 (`HTTP 201`)**：返回新加入成员对象。
+
+#### 5.3.2 群主/管理员踢人删除群员 (需求 ④)
+- **快捷接口路径**：`POST WORKER_BASE_URL/groups/:id/kick`
+- **或标准路径**：`DELETE WORKER_BASE_URL/groups/:id/members/:userId`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
+- **权限规则**：
+  - 群主 (`owner`) 可以踢除任何管理员和普通成员。
+  - 管理员 (`admin`) 只能踢除普通成员，无权踢除群主或其他管理员。
+  - 普通成员调用直接拦截，返回 `HTTP 403 Forbidden`。
+- **请求体 (POST /kick)**：
   ```json
   {
-    "id": "0xowner...:buidlers:0x41a0...",
-    "conversation_id": "0xowner...:buidlers",
-    "user_id": "0x41a0706a3636ce383a69054f52b46ac980743a1d",
-    "role": "member",
-    "joined_at": 1788587865000,
-    "last_read_message_id": null
+    "wallet_address": "0x41a0706a3636ce383a69054f52b46ac980743a1d"
+  }
+  ```
+  （也可使用 `user_id` 传参）。
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "success": true,
+    "message": "Member removed successfully"
   }
   ```
 
-### 5.4 移除群成员 / 主动退群
-
-- **接口路径**：`DELETE WORKER_BASE_URL/groups/:id/members/:userId`
+#### 5.3.3 成员主动退群 (需求 ⑤)
+- **快捷接口路径**：`POST WORKER_BASE_URL/groups/:id/leave`
+- **或标准路径**：`DELETE WORKER_BASE_URL/groups/:id/members/me`
 - **认证要求**：需要 `Authorization: Bearer <TOKEN>`
-- **权限逻辑**：
-  - **普通成员主动退群**：当 `:userId` 为当前登录用户本人时，成功退出并从成员名单移除。
-  - **群主踢人**：群主（`owner`）可移除任何成员。
-  - **群主退出**：因为群所有权不可移交，群主退群将触发**解散并删除整个群会话**。
+- **退群逻辑**：
+  - 普通成员或管理员调用：直接退出群聊，从成员列表中删除。
+  - 群主 (`owner`) 调用：由于主权群聊与创建者地址不可分割且不可移交，群主退群将触发**解散并删除整个群聊**。
 - **成功响应 (`HTTP 200`)**：
   ```json
   {
@@ -377,6 +496,116 @@ Nonce: c6233d4e6eb44078a6331a982994fef4",
     "message": "Left group successfully"
   }
   ```
+
+#### 5.3.4 委任或撤销管理员角色 (Admin Management)
+- **接口路径**：`PUT WORKER_BASE_URL/groups/:id/members/:userId/role`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`（**仅群主可操作**）
+- **请求体 (Content-Type: application/json)**：
+  ```json
+  {
+    "role": "admin" // 可选 "admin" 或 "member"
+  }
+  ```
+- **成功响应 (`HTTP 200`)**：返回更新后的成员记录，其中 `role` 更新为 `admin`，若原先被禁言会自动接触禁言。
+
+---
+
+### 5.4 细粒度禁言系统 (Moderation & Mute - 需求 ⑥)
+
+后端提供完整的**群全员禁言**与**个人指定禁言名单**，并具备时间自动过期恢复机制。
+
+> **【核心权限与业务规则】**：
+> 1. **管理员始终可以讲话 (`admin始终可以讲话`)**：
+>    - 无论是开启全员禁言，还是被误加名单，群主 (`owner`) 与管理员 (`admin`) 拥有最高发言豁免权，在任何禁言模式下均能正常发送文本、语音、图片、文件消息！
+>    - 后端尝试禁言群主或管理员时，会直接返回 `HTTP 400 Bad Request` 报错阻止。
+> 2. **全覆盖拦截**：
+>    - 当成员处于禁言状态时，以下操作将全部被拦截并返回 `HTTP 403 Forbidden`：
+>      - 发送文本消息 (`POST /conversations/:id/messages`)
+>      - 上传语音消息 (`POST /voice/upload`)
+>      - 上传图片消息 (`POST /images/upload`)
+>      - 上传文件附件 (`POST /files/upload`)
+
+#### 5.4.1 群全员禁言 (开启 / 解除)
+- **开启禁言接口**：`POST WORKER_BASE_URL/groups/:id/mute`
+- **解除禁言接口**：`POST WORKER_BASE_URL/groups/:id/unmute`
+- **权限要求**：群主 (`owner`) 或 管理员 (`admin`)
+- **请求体 (POST /mute)**：
+  ```json
+  {
+    "muted": true,
+    "duration_seconds": 3600 // 可选：禁言持续时长（秒）。不传或传 0 表示永久禁言，直到管理员主动解禁
+  }
+  ```
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "conversation_id": "0xcreatorAddress:buidlers",
+    "is_muted": true,
+    "mute_until": 1788591460000 // 禁言到期时间戳（毫秒），永久则为 null
+  }
+  ```
+
+#### 5.4.2 单独指定某人禁言 (开启 / 解除)
+- **对成员禁言接口**：`POST WORKER_BASE_URL/groups/:id/members/:userId/mute`
+- **对成员解禁接口**：`POST WORKER_BASE_URL/groups/:id/members/:userId/unmute`
+- **权限要求**：群主 (`owner`) 或 管理员 (`admin`)
+- **请求体 (POST /members/:userId/mute)**：
+  ```json
+  {
+    "muted": true,
+    "duration_seconds": 600, // 可选：禁言时长（秒），例如禁言 10 分钟。不传或传 0 为永久禁言
+    "reason": "发布违规引流广告" // 可选：禁言原因
+  }
+  ```
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "conversation_id": "0xcreatorAddress:buidlers",
+    "user_id": "0x41a0706a3636ce383a69054f52b46ac980743a1d",
+    "wallet_address": "0x41a0706a3636ce383a69054f52b46ac980743a1d",
+    "is_muted": true,
+    "muted_until": 1788588465000,
+    "mute_reason": "发布违规引流广告"
+  }
+  ```
+
+#### 5.4.3 查询群禁言状态与被禁言成员名单
+- **接口路径**：`GET WORKER_BASE_URL/groups/:id/muted`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`（群内成员均可查询）
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "conversation_id": "0xcreatorAddress:buidlers",
+    "is_group_muted": true,
+    "group_mute_until": null,
+    "muted_members": [
+      {
+        "user_id": "0x41a0706a3636ce383a69054f52b46ac980743a1d",
+        "wallet_address": "0x41a0706a3636ce383a69054f52b46ac980743a1d",
+        "muted_until": 1788588465000,
+        "mute_reason": "发布违规引流广告"
+      }
+    ]
+  }
+  ```
+
+#### 5.4.4 被禁言用户发言拦截表现
+当被禁言普通成员尝试发送消息时，接口返回 `HTTP 403 Forbidden`：
+```json
+{
+  "error": "Group chat is currently muted: only admins can send messages"
+}
+```
+或单人禁言报错：
+```json
+{
+  "error": "You have been muted in this group (Reason: 发布违规引流广告)"
+}
+```
+前端收到包含 `muted` 的 `HTTP 403` 报错时，应弹出 Toast 友好提示用户被禁言原因。
+在进入聊天室获取详情 `GET /conversations/:id` 时，可直接读取 `conversation.my_is_muted: boolean`：若为 `true`，前端可直接将聊天框输入框禁用并显示提示文字：“当前群已被全员禁言” 或 “您已被管理员禁言”。
+
+---
 
 ---
 
@@ -1396,7 +1625,22 @@ export interface AuthVerifyResponse {
 }
 
 export type ConversationType = "direct" | "group";
-export type MemberRole = "owner" | "member";
+export type MemberRole = "owner" | "admin" | "member";
+
+export interface GroupMarquee {
+  enabled: boolean;          // 是否在群顶部滚动播放群介绍
+  text?: string;             // 滚动播放文本（如果不填，前端默认采用 description）
+  speed?: number;            // 滚动速度（可选）
+}
+
+export interface GroupMetadata {
+  name?: string;             // ① 群名称 (同步并保存在 metadata 中)
+  description?: string;      // ② 群介绍 (保存在 metadata 中)
+  announcement?: string;     // 公告内容
+  marquee?: GroupMarquee;    // ③ 群顶部滚动播放群介绍内容配置
+  avatar_url?: string;       // 群头像
+  [key: string]: any;        // 允许前端挂载自定义扩展属性
+}
 
 export interface ConversationMember {
   id: string;
@@ -1406,6 +1650,9 @@ export interface ConversationMember {
   joined_at: number;
   last_read_message_id: string | null;
   wallet_address?: string;
+  is_muted?: boolean;
+  muted_until?: number | null;
+  mute_reason?: string | null;
 }
 
 export interface Conversation {
@@ -1413,9 +1660,13 @@ export interface Conversation {
   type: ConversationType;
   owner_address?: string | null;
   name: string | null;
+  metadata?: GroupMetadata;
+  is_muted?: boolean;
+  mute_until?: number | null;
   created_at: number;
   updated_at: number;
   my_role?: MemberRole;
+  my_is_muted?: boolean;
   role?: MemberRole;
   member_count?: number;
   members?: ConversationMember[];
@@ -1641,22 +1892,57 @@ export class Web3ChatClient {
     return this.request<Conversation>(`/conversations/${conversationId}`);
   }
 
-  // ==================== 3. 群聊模块 ====================
+  // ==================== 3. 群聊与管控模块 (TASK-017) ====================
 
-  public async createGroup(name: string, memberIds: string[] = [], slug?: string): Promise<Conversation> {
+  /** 创建主权群聊（支持初始群介绍与顶部跑马灯配置） */
+  public async createGroup(
+    name: string,
+    memberIds: string[] = [],
+    options?: {
+      description?: string;
+      announcement?: string;
+      marquee?: GroupMarquee;
+      metadata?: Record<string, any>;
+      slug?: string;
+    }
+  ): Promise<Conversation> {
     return this.request<Conversation>("/groups", {
       method: "POST",
-      body: JSON.stringify({ name, member_ids: memberIds, slug }),
+      body: JSON.stringify({
+        name,
+        member_ids: memberIds,
+        description: options?.description,
+        announcement: options?.announcement,
+        marquee: options?.marquee,
+        metadata: options?.metadata,
+        slug: options?.slug,
+      }),
     });
   }
 
-  public async updateGroupName(groupId: string, name: string): Promise<Conversation> {
+  /** 修改群名称、群介绍与顶部滚动播放配置 (需求 ①、②、③) */
+  public async updateGroup(
+    groupId: string,
+    updates: {
+      name?: string;
+      description?: string;
+      announcement?: string;
+      marquee?: GroupMarquee | boolean;
+      metadata?: Record<string, any>;
+    }
+  ): Promise<Conversation> {
     return this.request<Conversation>(`/groups/${groupId}`, {
       method: "PATCH",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(updates),
     });
   }
 
+  /** 兼容旧版更新群名称 */
+  public async updateGroupName(groupId: string, name: string): Promise<Conversation> {
+    return this.updateGroup(groupId, { name });
+  }
+
+  /** 邀请/添加群成员 */
   public async addGroupMember(groupId: string, targetAddressOrId: string) {
     const payload = targetAddressOrId.startsWith("0x")
       ? { wallet_address: targetAddressOrId }
@@ -1667,10 +1953,111 @@ export class Web3ChatClient {
     });
   }
 
+  /** 群主/管理员踢除群成员 (需求 ④) */
+  public async kickGroupMember(groupId: string, targetAddressOrId: string) {
+    const payload = targetAddressOrId.startsWith("0x")
+      ? { wallet_address: targetAddressOrId }
+      : { user_id: targetAddressOrId };
+    return this.request<{ success: boolean; message: string }>(`/groups/${groupId}/kick`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /** 兼容 RESTful DELETE 接口删除成员 */
   public async removeGroupMember(groupId: string, userId: string) {
-    return this.request(`/groups/${groupId}/members/${userId}`, {
+    return this.request<{ success: boolean; message: string }>(`/groups/${groupId}/members/${userId}`, {
       method: "DELETE",
     });
+  }
+
+  /** 成员主动退群 (需求 ⑤) */
+  public async leaveGroup(groupId: string) {
+    return this.request<{ success: boolean; message: string }>(`/groups/${groupId}/leave`, {
+      method: "POST",
+    });
+  }
+
+  /** 群主委任或撤销管理员权限 */
+  public async updateMemberRole(groupId: string, targetAddressOrId: string, role: "admin" | "member") {
+    return this.request<ConversationMember>(`/groups/${groupId}/members/${targetAddressOrId}/role`, {
+      method: "PUT",
+      body: JSON.stringify({ role }),
+    });
+  }
+
+  /** 群全员禁言开关 (需求 ⑥) */
+  public async setGroupMute(groupId: string, options?: { muted?: boolean; durationSeconds?: number }) {
+    return this.request<{ conversation_id: string; is_muted: boolean; mute_until: number | null }>(
+      `/groups/${groupId}/mute`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          muted: options?.muted !== undefined ? options.muted : true,
+          duration_seconds: options?.durationSeconds,
+        }),
+      }
+    );
+  }
+
+  /** 解除群全员禁言 */
+  public async unmuteGroup(groupId: string) {
+    return this.request<{ conversation_id: string; is_muted: boolean; mute_until: number | null }>(
+      `/groups/${groupId}/unmute`,
+      { method: "POST" }
+    );
+  }
+
+  /** 指定某人禁言 (需求 ⑥) */
+  public async setMemberMute(
+    groupId: string,
+    targetAddressOrId: string,
+    options?: { muted?: boolean; durationSeconds?: number; reason?: string }
+  ) {
+    return this.request<{
+      conversation_id: string;
+      user_id: string;
+      wallet_address: string;
+      is_muted: boolean;
+      muted_until: number | null;
+      mute_reason: string | null;
+    }>(`/groups/${groupId}/members/${targetAddressOrId}/mute`, {
+      method: "POST",
+      body: JSON.stringify({
+        muted: options?.muted !== undefined ? options.muted : true,
+        duration_seconds: options?.durationSeconds,
+        reason: options?.reason,
+      }),
+    });
+  }
+
+  /** 解除指定某人禁言 */
+  public async unmuteMember(groupId: string, targetAddressOrId: string) {
+    return this.request<{
+      conversation_id: string;
+      user_id: string;
+      wallet_address: string;
+      is_muted: boolean;
+      muted_until: number | null;
+      mute_reason: string | null;
+    }>(`/groups/${groupId}/members/${targetAddressOrId}/unmute`, {
+      method: "POST",
+    });
+  }
+
+  /** 查询群禁言状态与被禁言成员名单 */
+  public async getGroupMuteStatus(groupId: string) {
+    return this.request<{
+      conversation_id: string;
+      is_group_muted: boolean;
+      group_mute_until: number | null;
+      muted_members: Array<{
+        user_id: string;
+        wallet_address: string;
+        muted_until: number | null;
+        mute_reason: string | null;
+      }>;
+    }>(`/groups/${groupId}/muted`);
   }
 
   // ==================== 4. 消息模块 ====================

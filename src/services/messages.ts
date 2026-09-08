@@ -1,5 +1,6 @@
 import type { MessageRow, VoiceMessageRow, ImageMessageRow, FileMessageRow } from '../db/schema';
 import { destroyMessage, destroyMediaOnly } from './destruction';
+import { assertCanSendMessage } from './conversations';
 
 export interface MessageWithSender extends MessageRow {
   sender_address: string;
@@ -54,34 +55,8 @@ export async function sendMessage(
   senderId: string,
   options: SendMessageOptions
 ): Promise<MessageRow> {
-  const membership = await db.prepare(
-    'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
-  ).bind(conversationId, senderId).first();
-
-  if (!membership) {
-    throw new Error('Unauthorized: you are not a member of this conversation');
-  }
-
-  // Check if sender is blocked in direct chat
-  const conv = await db.prepare(
-    'SELECT type FROM conversations WHERE id = ?'
-  ).bind(conversationId).first<{ type: string }>();
-
-  if (conv?.type === 'direct') {
-    const otherMember = await db.prepare(
-      'SELECT user_id FROM conversation_members WHERE conversation_id = ? AND user_id != ?'
-    ).bind(conversationId, senderId).first<{ user_id: string }>();
-
-    if (otherMember) {
-      const isBlocked = await db.prepare(
-        'SELECT 1 FROM blacklist WHERE user_id = ? AND blocked_address = ?'
-      ).bind(otherMember.user_id, senderId).first();
-
-      if (isBlocked) {
-        throw new Error('Cannot send message: you have been blocked by this user');
-      }
-    }
-  }
+  // 1. Check membership, blacklist, group mute, and individual mute
+  await assertCanSendMessage(db, conversationId, senderId);
 
   const type = options.type || 'text';
   if (type === 'text' && (!options.content || !options.content.trim())) {

@@ -11,8 +11,7 @@ export type Session = SessionRow;
 export type Friend = FriendRow;
 export type Blacklist = BlacklistRow;
 
-export type ConversationType = 'direct' | 'group';
-export type MemberRole = 'owner' | 'member';
+export type MemberRole = 'owner' | 'admin' | 'member';
 export type MessageType = 'text' | 'voice' | 'image' | 'file';
 export type RetentionType = 'permanent' | 'on_read';
 export type MessageStatus = 'pending' | 'delivered' | 'read';

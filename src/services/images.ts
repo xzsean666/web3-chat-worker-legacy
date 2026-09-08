@@ -1,4 +1,5 @@
 import type { MessageRow, ImageMessageRow } from '../db/schema';
+import { assertCanSendMessage } from './conversations';
 
 const ALLOWED_IMAGE_MIME_TYPES: Record<string, string> = {
   'image/jpeg': 'jpg',
@@ -33,14 +34,8 @@ export async function uploadImageMessage(
   senderId: string,
   params: UploadImageParams
 ): Promise<{ message: MessageRow; image: ImageMessageRow }> {
-  // 1. Verify membership
-  const membership = await db.prepare(
-    'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
-  ).bind(params.conversation_id, senderId).first();
-
-  if (!membership) {
-    throw new Error('Unauthorized: you are not a member of this conversation');
-  }
+  // 1. Verify membership and mute permissions
+  await assertCanSendMessage(db, params.conversation_id, senderId);
 
   // 2. Validate MIME type
   const normalizedMime = params.mime_type.toLowerCase().split(';')[0].trim();

@@ -260,30 +260,73 @@ Get conversation metadata and members.
 - **Response**: `200 OK`
 
 #### `POST /groups`
-Create a sovereign group conversation with the creator assigned as permanent `owner`.
+Create a sovereign group conversation with initial metadata (description, announcement, marquee scrolling config).
 - **Request Body**:
   ```json
   {
     "name": "Web3 BUIDLers",
+    "description": "Welcome to the Web3 BUIDLers community!",
+    "announcement": "Pinned: Contract audit completed.",
+    "marquee": {
+      "enabled": true,
+      "text": "Welcome to the Web3 BUIDLers community!",
+      "speed": 50
+    },
     "member_ids": ["0xbob...", "0xcharlie..."],
     "slug": "buidlers" // optional, defaults to 8-char random hex
   }
   ```
-- **Response**: `201 Created` (ID format: `0xcreatorAddress:slug`)
+- **Response**: `201 Created` (ID format: `0xcreatorAddress:slug`), returns parsed `metadata` object.
 
-#### `PATCH /groups/:id`
-Update group name (`owner` only; forbidden for non-owners with HTTP 403).
-- **Request Body**: `{ "name": "New Name" }`
+#### `PATCH /groups/:id` / `PATCH /groups/:id/metadata`
+Update group name, description, and top marquee scrolling configuration (`owner` or `admin` only).
+- **Request Body**:
+  ```json
+  {
+    "name": "Web3 Super Builders",
+    "description": "Updated group description.",
+    "marquee": {
+      "enabled": true,
+      "text": "Breaking announcement: Live demo today!"
+    }
+  }
+  ```
+- **Response**: `200 OK` returns updated conversation with synchronized `metadata`.
 
 #### `POST /groups/:id/members`
-Add member to group (`owner` only).
+Add member to group (`owner` or `admin`).
 - **Request Body**: `{ "user_id": "0xdave..." }` or `{ "wallet_address": "0xdave..." }`
 
+#### `POST /groups/:id/kick`
+Kick/delete a member from the group (`owner` or `admin`).
+- **Request Body**: `{ "user_id": "0xcharlie..." }` or `{ "wallet_address": "0xcharlie..." }`
+
 #### `DELETE /groups/:id/members/:userId`
-Remove member from group.
-- `owner` can remove any member.
-- Any member can leave voluntarily.
+Remove member from group or self-leave.
+- `owner` can remove any member or admin.
+- `admin` can remove regular members.
+- Regular members cannot kick anyone.
+
+#### `POST /groups/:id/leave`
+Voluntarily leave the group for members and admins.
 - If the `owner` leaves, ownership cannot be transferred; the sovereign group is automatically deleted.
+
+#### `PUT /groups/:id/members/:userId/role`
+Promote or demote group members (`owner` only).
+- **Request Body**: `{ "role": "admin" }` or `{ "role": "member" }`
+
+#### `POST /groups/:id/mute` / `POST /groups/:id/unmute`
+Enable or disable group-wide mute (`owner` or `admin` only).
+- **Request Body**: `{ "muted": true, "duration_seconds": 3600 }` (0 or omitted = indefinite)
+- **Admin Exemption**: Group owner and admins can ALWAYS speak under group mute ("admin始终可以讲话").
+
+#### `POST /groups/:id/members/:userId/mute` / `POST /groups/:id/members/:userId/unmute`
+Mute or unmute an individual member with reason and duration (`owner` or `admin` only).
+- **Request Body**: `{ "muted": true, "duration_seconds": 600, "reason": "Spamming" }`
+- Group owner and admins cannot be muted.
+
+#### `GET /groups/:id/muted`
+Query group mute status and the active muted member list.
 
 ---
 

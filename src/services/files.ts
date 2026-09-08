@@ -1,4 +1,5 @@
 import type { MessageRow, FileMessageRow } from '../db/schema';
+import { assertCanSendMessage } from './conversations';
 
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
 
@@ -25,14 +26,8 @@ export async function uploadFileMessage(
   senderId: string,
   params: UploadFileParams
 ): Promise<{ message: MessageRow; file: FileMessageRow }> {
-  // 1. Verify membership
-  const membership = await db.prepare(
-    'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
-  ).bind(params.conversation_id, senderId).first();
-
-  if (!membership) {
-    throw new Error('Unauthorized: you are not a member of this conversation');
-  }
+  // 1. Verify membership and mute permissions
+  await assertCanSendMessage(db, params.conversation_id, senderId);
 
   // 2. Validate file name
   const rawFileName = (params.file_name || '').trim();

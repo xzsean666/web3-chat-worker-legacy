@@ -29,7 +29,7 @@ messageRoutes.post('/conversations/:id/messages', async (c) => {
     const message = await sendMessage(c.env.DB, conversationId, user.id, body);
     return c.json(message, 201);
   } catch (err: any) {
-    const status = err.message.includes('Unauthorized') || err.message.includes('blocked') ? 403 : 400;
+    const status = err.message.includes('Unauthorized') || err.message.includes('blocked') || err.message.includes('muted') ? 403 : 400;
     return c.json({ error: err.message }, status);
   }
 });

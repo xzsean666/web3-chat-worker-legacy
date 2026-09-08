@@ -885,8 +885,174 @@ async function main() {
   }
   logSuccess(`Charlie unblocked Bob`);
 
-  // 16. Session Logout & Revocation
-  logStep('Step 16', 'Session Logout & Revocation');
+  // 16. Group Metadata, Moderation (Mute), Owner Kick, Member Leave & Admin Privileges (TASK-017)
+  logStep('Step 16', 'Group Metadata, Moderation (Mute), Owner Kick, Member Leave & Admin Privileges (TASK-017)');
+  // 16.1 Create group with initial metadata, description, and marquee scrolling banner
+  const newGroupRes = await request('/groups', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({
+      name: 'Web3 Production Alpha',
+      description: 'Official alpha channel for verified community members.',
+      announcement: 'Pinned: Contract audit completed with 0 vulnerabilities.',
+      marquee: {
+        enabled: true,
+        text: 'Welcome! Pinned: Contract audit completed with 0 vulnerabilities.',
+        speed: 45,
+      },
+      member_ids: [bob.address, charlie.address],
+    }),
+  });
+  if (newGroupRes.status !== 201 || !newGroupRes.data?.id) {
+    throw new Error(`Create group with metadata failed: ${JSON.stringify(newGroupRes.data)}`);
+  }
+  const testGroup = newGroupRes.data;
+  logSuccess(`Alice created group "${testGroup.name}" with metadata & top marquee banner`);
+
+  // 16.2 Update group name, description, and marquee config (①, ②, ③)
+  const updateGroupRes = await request(`/groups/${testGroup.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({
+      name: 'Web3 Production Alpha V2',
+      description: 'Upgraded alpha channel with real-time on-chain alerts.',
+      marquee: {
+        enabled: true,
+        text: 'Breaking: Mainnet upgrade scheduled for tomorrow!',
+      },
+    }),
+  });
+  if (
+    updateGroupRes.status !== 200 ||
+    updateGroupRes.data?.name !== 'Web3 Production Alpha V2' ||
+    updateGroupRes.data?.metadata?.description !== 'Upgraded alpha channel with real-time on-chain alerts.' ||
+    updateGroupRes.data?.metadata?.marquee?.enabled !== true
+  ) {
+    throw new Error(`Update group metadata failed: ${JSON.stringify(updateGroupRes.data)}`);
+  }
+  logSuccess(`Updated group name, description, and marquee scroll banner (synchronized in metadata)`);
+
+  // 16.3 Promote Bob to Admin (Role Management)
+  const promoteBobRes = await request(`/groups/${testGroup.id}/members/${bob.address}/role`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({ role: 'admin' }),
+  });
+  if (promoteBobRes.status !== 200 || promoteBobRes.data?.role !== 'admin') {
+    throw new Error(`Promote member to admin failed: ${JSON.stringify(promoteBobRes.data)}`);
+  }
+  logSuccess(`Alice promoted Bob to admin role`);
+
+  // 16.4 Group-Wide Mute (全员禁言) & Admin speech exemption (⑥)
+  const muteGroupRes = await request(`/groups/${testGroup.id}/mute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({ muted: true }),
+  });
+  if (muteGroupRes.status !== 200 || muteGroupRes.data?.is_muted !== true) {
+    throw new Error(`Group mute failed: ${JSON.stringify(muteGroupRes.data)}`);
+  }
+  logSuccess(`Alice enabled group-wide mute`);
+
+  // Charlie (regular member) attempts to speak -> 403 Forbidden
+  const charlieMutedMsgRes = await request(`/conversations/${testGroup.id}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${charlie.token}` },
+    body: JSON.stringify({ content: 'I should be blocked by group mute' }),
+  });
+  if (charlieMutedMsgRes.status !== 403) {
+    throw new Error(`Expected HTTP 403 for member during group mute, got: ${charlieMutedMsgRes.status}`);
+  }
+  logSuccess(`Charlie (regular member) correctly rejected with HTTP 403 during group mute`);
+
+  // Bob (admin) sends message -> 201 Created ("admin始终可以讲话")
+  const bobAdminMsgRes = await request(`/conversations/${testGroup.id}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bob.token}` },
+    body: JSON.stringify({ content: 'Admin Bob broadcast: Group is muted for maintenance.' }),
+  });
+  if (bobAdminMsgRes.status !== 201) {
+    throw new Error(`Expected admin to be able to speak during group mute, got: ${bobAdminMsgRes.status}`);
+  }
+  logSuccess(`Bob (admin) successfully sent message during group mute ("admin始终可以讲话")`);
+
+  // Alice un-mutes the group
+  const unmuteGroupRes = await request(`/groups/${testGroup.id}/unmute`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${alice.token}` },
+  });
+  if (unmuteGroupRes.status !== 200 || unmuteGroupRes.data?.is_muted !== false) {
+    throw new Error(`Group unmute failed: ${JSON.stringify(unmuteGroupRes.data)}`);
+  }
+  logSuccess(`Alice un-muted the group`);
+
+  // 16.5 Individual Member Mute List (单独某人禁言名单 - ⑥)
+  const muteCharlieRes = await request(`/groups/${testGroup.id}/members/${charlie.address}/mute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({ muted: true, reason: 'Temporary cooldown' }),
+  });
+  if (muteCharlieRes.status !== 200 || muteCharlieRes.data?.is_muted !== true) {
+    throw new Error(`Individual member mute failed: ${JSON.stringify(muteCharlieRes.data)}`);
+  }
+  logSuccess(`Alice added Charlie to individual mute list (reason: Temporary cooldown)`);
+
+  // Query muted list via GET /groups/:id/muted
+  const mutedListRes = await request(`/groups/${testGroup.id}/muted`, {
+    headers: { Authorization: `Bearer ${alice.token}` },
+  });
+  if (
+    mutedListRes.status !== 200 ||
+    !mutedListRes.data?.muted_members?.some((m: any) => m.user_id === charlie.address)
+  ) {
+    throw new Error(`Query muted list failed: ${JSON.stringify(mutedListRes.data)}`);
+  }
+  logSuccess(`Verified Charlie appears on muted member list`);
+
+  // Charlie tries to send message -> 403 Forbidden
+  const charlieIndMutedMsg = await request(`/conversations/${testGroup.id}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${charlie.token}` },
+    body: JSON.stringify({ content: 'I am individually muted' }),
+  });
+  if (charlieIndMutedMsg.status !== 403) {
+    throw new Error(`Expected HTTP 403 for individually muted member, got: ${charlieIndMutedMsg.status}`);
+  }
+  logSuccess(`Charlie correctly rejected with HTTP 403 while individually muted`);
+
+  // Alice un-mutes Charlie
+  const unmuteCharlieRes = await request(`/groups/${testGroup.id}/members/${charlie.address}/unmute`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${alice.token}` },
+  });
+  if (unmuteCharlieRes.status !== 200) {
+    throw new Error(`Unmute member failed: ${JSON.stringify(unmuteCharlieRes.data)}`);
+  }
+  logSuccess(`Alice un-muted Charlie`);
+
+  // 16.6 Member Leaves Group (⑤ 成员可以退群)
+  const charlieLeaveRes = await request(`/groups/${testGroup.id}/leave`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${charlie.token}` },
+  });
+  if (charlieLeaveRes.status !== 200 || !charlieLeaveRes.data?.success) {
+    throw new Error(`Member leave failed: ${JSON.stringify(charlieLeaveRes.data)}`);
+  }
+  logSuccess(`Charlie voluntarily left the group via POST /groups/:id/leave`);
+
+  // 16.7 Owner Kicks Member (④ 可以群主管理踢人删除群员)
+  const kickBobRes = await request(`/groups/${testGroup.id}/kick`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({ wallet_address: bob.address }),
+  });
+  if (kickBobRes.status !== 200 || !kickBobRes.data?.success) {
+    throw new Error(`Owner kick failed: ${JSON.stringify(kickBobRes.data)}`);
+  }
+  logSuccess(`Alice (owner) kicked Bob via POST /groups/:id/kick`);
+
+  // 17. Session Logout & Revocation
+  logStep('Step 17', 'Session Logout & Revocation');
   const logoutRes = await request('/auth/logout', {
     method: 'POST',
     headers: { Authorization: `Bearer ${alice.token}` },

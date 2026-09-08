@@ -59,7 +59,10 @@
   - Group: `${owner_address}:${slug_or_salt}` (self-certifying sovereign ID)
 - `type`: TEXT NOT NULL CHECK(type IN ('direct', 'group'))
 - `owner_address`: TEXT (creator EVM wallet address for groups; immutable, cannot be transferred)
-- `name`: TEXT (group name)
+- `name`: TEXT (group name, synchronized with `metadata.name`)
+- `metadata`: TEXT NOT NULL DEFAULT '{}' (JSON containing name, description, announcement, marquee scrolling config, custom fields)
+- `is_muted`: INTEGER NOT NULL DEFAULT 0 (1 when group-wide mute is enabled)
+- `mute_until`: INTEGER (timestamp ms until which group is muted; NULL/0 for indefinite)
 - `created_at`: INTEGER NOT NULL
 - `updated_at`: INTEGER NOT NULL (used for Last-Write-Wins LWW state merging)
 
@@ -67,7 +70,9 @@
 - `id`: TEXT PRIMARY KEY (deterministic `${conversation_id}:${user_id}`)
 - `conversation_id`: TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE
 - `user_id`: TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE (EVM wallet address)
-- `role`: TEXT NOT NULL CHECK(role IN ('owner', 'member'))
+- `role`: TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'member'))
+- `muted_until`: INTEGER (timestamp ms until which member is muted; -1 for indefinite, NULL for unmuted)
+- `mute_reason`: TEXT (optional moderator reason)
 - `joined_at`: INTEGER NOT NULL
 - `last_read_message_id`: TEXT
 - UNIQUE(conversation_id, user_id)

@@ -33,6 +33,9 @@ export interface ConversationRow {
   type: 'direct' | 'group';
   owner_address: string | null;
   name: string | null;
+  metadata: string;
+  is_muted: number;
+  mute_until: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -41,7 +44,9 @@ export interface ConversationMemberRow {
   id: string;
   conversation_id: string;
   user_id: string;
-  role: 'owner' | 'member';
+  role: 'owner' | 'admin' | 'member';
+  muted_until: number | null;
+  mute_reason: string | null;
   joined_at: number;
   last_read_message_id: string | null;
 }

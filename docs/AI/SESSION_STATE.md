@@ -4,7 +4,7 @@
 Build a high-performance, single-node Cloudflare Worker Web3 Chat MVP supporting EVM wallet signature login, direct/group chat, text and voice messaging, explicit delivery ACK, burn-on-read, voice destruction (R2), and incremental sync.
 
 ## Current Task
-TASK-016: Social System: Friends List, Friend Tagging & Blacklist Enforcement
+TASK-017: Group Metadata, Moderation (Mute System), Owner Kick, Member Leave & Admin Privileges
 
 ## Current Status
 DONE
@@ -15,7 +15,7 @@ DONE
 - Documented project goal in `docs/AI/GOAL.md`.
 - Defined architecture, D1 schema, and incremental sync protocols in `docs/AI/ARCHITECTURE.md`.
 - Recorded architectural decisions in `docs/AI/DECISIONS.md`.
-- Outlined task breakdown in `docs/AI/TASK_INDEX.md` and detailed specs in `docs/AI/tasks/TASK-001.md` through `TASK-016.md`.
+- Outlined task breakdown in `docs/AI/TASK_INDEX.md` and detailed specs in `docs/AI/tasks/TASK-001.md` through `TASK-017.md`.
 - Initialized `package.json`, configured `pnpm`, installed `hono`, `viem`, `wrangler`, `vitest`, and `@cloudflare/workers-types`.
 - Configured `tsconfig.json` for Cloudflare Worker runtime.
 - Configured `wrangler.jsonc` with D1 `DB` binding, R2 `VOICE_BUCKET` binding, and scheduled cron triggers.
@@ -93,50 +93,48 @@ DONE
 - TASK-016: Enforced blacklist blocking in `getOrCreateDirectConversation` and `sendMessage` (HTTP 403 Forbidden). Added `mentions` support in messages.
 - TASK-016: Created `test/social.test.ts` (3 tests passing).
 - TASK-016: Documented ADR-010 in `docs/AI/DECISIONS.md`, updated `docs/AI/ARCHITECTURE.md`, `README.md`, and completely updated `docs/FRONTEND_INTEGRATION.md` with TypeScript SDK methods and types.
+- TASK-017: Created `migrations/0005_group_metadata_and_moderation.sql` adding `metadata`, `is_muted`, `mute_until` to `conversations`, and `muted_until`, `mute_reason` to `conversation_members`.
+- TASK-017: Updated `src/db/schema.ts` and `src/types.ts` with `GroupMetadata`, `GroupMarquee`, `ConversationRow`, `ConversationMemberRow`, and `MemberRole` ('owner' | 'admin' | 'member').
+- TASK-017: Implemented `updateGroup` supporting `metadata.name`, `metadata.description`, and `metadata.marquee` with auto-sync to `conversations.name`.
+- TASK-017: Implemented `setGroupMute`, `setMemberMute`, `getGroupMuteStatus`, and `assertCanSendMessage` enforcing group/member mute across text, voice, image, and file messages, while guaranteeing owner and admin speech invariance ("admin始终可以讲话").
+- TASK-017: Implemented `leaveGroup` and owner/admin kick endpoints (`POST /groups/:id/kick`, `DELETE /groups/:id/members/:userId`), plus administrator role assignment (`PUT /groups/:id/members/:userId/role`).
+- TASK-017: Created `test/group_features.test.ts` (7 tests) verifying metadata sync, group mute, member mute, admin speech bypass, kick, and leave.
+- TASK-017: Applied remote migration `0005_group_metadata_and_moderation.sql` to Cloudflare D1.
+- TASK-017: Deployed to Cloudflare Worker (Version `5c31d3be-8b2e-4d73-a714-0370d64c2bb7`).
+- TASK-017: Executed `pnpm run test:live` against live production URL `https://web3-chat-worker.002788.xyz` with 17/17 steps passing.
+- TASK-017: Updated `docs/FRONTEND_INTEGRATION.md` with marquee React/Vue component example, SDK methods, and updated `README.md`, `docs/AI/ARCHITECTURE.md`, `docs/AI/DECISIONS.md` (ADR-011).
 
 ## Modified Files
-- `migrations/0004_user_social_and_message_features.sql`
+- `migrations/0005_group_metadata_and_moderation.sql`
 - `src/db/schema.ts`
 - `src/types.ts`
-- `src/services/users.ts`
-- `src/routes/users.ts`
-- `src/services/social.ts`
-- `src/routes/social.ts`
-- `src/services/messages.ts`
-- `src/routes/messages.ts`
 - `src/services/conversations.ts`
-- `src/services/destruction.ts`
-- `src/services/cleanup.ts`
+- `src/services/messages.ts`
 - `src/services/voice.ts`
 - `src/services/images.ts`
 - `src/services/files.ts`
-- `src/index.ts`
-- `test/users.test.ts`
-- `test/recall_and_burn.test.ts`
-- `test/social.test.ts`
-- `test/db.test.ts`
-- `test/receipts.test.ts`
-- `test/voice.test.ts`
-- `test/images.test.ts`
-- `test/files.test.ts`
-- `test/e2e.test.ts`
+- `src/routes/groups.ts`
+- `src/routes/messages.ts`
+- `src/routes/voice.ts`
+- `src/routes/images.ts`
+- `src/routes/files.ts`
+- `test/helpers/db.ts`
+- `test/group_features.test.ts`
 - `scripts/live-e2e.ts`
 - `docs/FRONTEND_INTEGRATION.md`
 - `README.md`
 - `docs/AI/ARCHITECTURE.md`
 - `docs/AI/DECISIONS.md`
-- `docs/AI/tasks/TASK-014.md`
-- `docs/AI/tasks/TASK-015.md`
-- `docs/AI/tasks/TASK-016.md`
+- `docs/AI/tasks/TASK-017.md`
 - `docs/AI/TASK_INDEX.md`
 - `docs/AI/SESSION_STATE.md`
 
 ## Verification Commands & Results
 - `pnpm run typecheck`: Success (zero type errors across all source and test files).
-- `pnpm test`: Success (70/70 tests passing across 14 test suites with 100% pass rate).
-- `pnpm wrangler d1 migrations apply web3_chat_db --remote`: Successfully applied migration `0004_user_social_and_message_features.sql`.
-- `pnpm wrangler deploy`: Successfully deployed to Cloudflare Worker (Version `4a95a98e-3ecc-41e8-ae9e-1acf4948c1a0`).
-- `pnpm run test:live`: Success (16/16 steps passed against live production endpoint `https://web3-chat-worker.002788.xyz` covering Auth, 1:1 Chat, Group RBAC, Voice/Image/File upload & streaming, 30s burn-on-read grace window, batch ACK, TTL cleanup, dual-metadata & avatar, 30s recall with R2 purge, social friends & tags, blacklist enforcement & 403 chat rejection, and session logout).
+- `pnpm test`: Success (77/77 tests passing across 15 test suites with 100% pass rate).
+- `pnpm wrangler d1 migrations apply web3_chat_db --remote`: Successfully applied migration `0005_group_metadata_and_moderation.sql` to remote D1.
+- `pnpm wrangler deploy`: Successfully deployed to Cloudflare Worker (Version `5c31d3be-8b2e-4d73-a714-0370d64c2bb7`).
+- `pnpm run test:live`: Success (17/17 steps passed against live production endpoint `https://web3-chat-worker.002788.xyz` covering Auth, 1:1 Chat, Group RBAC, Voice/Image/File upload & streaming, 30s burn-on-read grace window, batch ACK, TTL cleanup, dual-metadata & avatar, 30s recall with R2 purge, social friends & tags, blacklist enforcement & 403 chat rejection, group metadata, marquee scrolling, group mute, individual member mute, admin speech invariance, member kick, and voluntary leave).
 
 ## Unresolved Issues
 None.

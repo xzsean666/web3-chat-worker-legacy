@@ -85,3 +85,21 @@
   5. **Social Graph & Blacklist Enforcement**: Created `friends` (with `alias` and JSON `tags` array) and `blacklist` tables. When user B has blocked user A, user A cannot initiate a 1:1 chat or send messages to user B (returns HTTP 403 Forbidden). Messages support optional `@mentions`.
 - **Consequences**: User customization and social features are fully integrated into the existing Cloudflare Worker architecture without compromising ephemeral privacy or storage efficiency.
 
+## ADR-011: Group Metadata, Moderation (Mute System), Member Management & Sovereign Group Role Control
+- **Context**: Community groups require rich metadata (group name, description, top marquee scrolling banners), moderation capabilities (group-wide mute and per-member mute lists), voluntary self-leaving, owner kick mechanisms, and administrator delegation while preserving sovereign single-ownership and immutable decentralization guarantees.
+- **Decision**:
+  1. **Group Metadata Storage**: Added `metadata TEXT NOT NULL DEFAULT '{}'` column to `conversations`. The JSON stores `name`, `description`, `announcement`, `marquee: { enabled, text, speed }`, and arbitrary custom frontend attributes. Changes to `metadata.name` or root `name` are kept bidirectionally synchronized with the database column `conversations.name`.
+  2. **Top Marquee Scrolling Banner**: Metadata stores `marquee: { enabled: boolean, text?: string, speed?: number }`. Frontends render this banner at the top of the group chat window, defaulting to `description` if `text` is omitted.
+  3. **Three-Tier RBAC (Owner, Admin, Member)**:
+     - Group creator is permanent immutable `owner`.
+     - Owner can promote/demote members to `admin` (`PUT /groups/:id/members/:userId/role`).
+     - Owner can kick any member or admin (`POST /groups/:id/kick`, `DELETE /groups/:id/members/:userId`).
+     - Admins can kick regular members (cannot kick owner or other admins).
+  4. **Voluntary Self-Leaving**: Any member or admin can leave the group (`POST /groups/:id/leave`, `DELETE /groups/:id/members/me`). If the owner leaves, the sovereign group is deleted.
+  5. **Moderation & Mute System**:
+     - Group-wide mute (`POST /groups/:id/mute` / `POST /groups/:id/unmute`) with optional duration in seconds or indefinite.
+     - Individual member mute (`POST /groups/:id/members/:userId/mute` / `unmute`) with duration and optional reason.
+     - **Admin Speech Invariance ("admin始终可以讲话")**: Group owner and admins are completely exempt from mute restrictions and can always send messages across text, voice, image, and file channels.
+     - Mute queries: `GET /groups/:id/muted` returns group mute status and the active muted member list.
+- **Consequences**: Provides comprehensive group management and real-time moderation capabilities while preserving conflict-free sovereign group architecture.
+
