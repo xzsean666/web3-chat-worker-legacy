@@ -88,20 +88,22 @@ export async function uploadImageMessage(
     },
   });
 
-  // 5. Save message and image metadata in D1
-  await db.prepare(`
+  // 5. Save message and image metadata in D1 in a single atomic batch
+  const msgStmt = db.prepare(`
     INSERT INTO messages (
       id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds
     ) VALUES (?, ?, ?, 'image', ?, ?, 'pending', ?, ?, ?)
-  `).bind(messageId, params.conversation_id, senderId, content, retention, expiresAt, now, burnAfterSeconds).run();
+  `).bind(messageId, params.conversation_id, senderId, content, retention, expiresAt, now, burnAfterSeconds);
 
-  await db.prepare(`
+  const imgStmt = db.prepare(`
     INSERT INTO image_messages (
       id, message_id, object_key, file_name, mime_type, size, width, height, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(imageId, messageId, objectKey, fileName, normalizedMime, byteLength, width, height, now).run();
+  `).bind(imageId, messageId, objectKey, fileName, normalizedMime, byteLength, width, height, now);
 
-  await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, params.conversation_id).run();
+  const convStmt = db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, params.conversation_id);
+
+  await db.batch([msgStmt, imgStmt, convStmt]);
 
   const message: MessageRow = {
     id: messageId,

@@ -49,6 +49,16 @@ export interface MessageReceiptsSummary {
   receipts: RecipientReceipt[];
 }
 
+let lastMonotonicTimestamp = 0;
+export function getMonotonicNow(): number {
+  let now = Date.now();
+  if (now <= lastMonotonicTimestamp) {
+    now = lastMonotonicTimestamp + 1;
+  }
+  lastMonotonicTimestamp = now;
+  return now;
+}
+
 export async function sendMessage(
   db: D1Database,
   conversationId: string,
@@ -75,18 +85,20 @@ export async function sendMessage(
       ? options.expires_in_seconds * 1000
       : 24 * 60 * 60 * 1000;
 
-  const now = Date.now();
+  const now = getMonotonicNow();
   const expiresAt = now + expiresInMs;
   const messageId = crypto.randomUUID();
   const content = options.content ? options.content.trim() : null;
 
-  await db.prepare(`
+  const insertStmt = db.prepare(`
     INSERT INTO messages (
       id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds, mentions
     ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-  `).bind(messageId, conversationId, senderId, type, content, retention, expiresAt, now, burnAfterSeconds, mentionsJson).run();
+  `).bind(messageId, conversationId, senderId, type, content, retention, expiresAt, now, burnAfterSeconds, mentionsJson);
 
-  await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId).run();
+  const updateStmt = db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId);
+
+  await db.batch([insertStmt, updateStmt]);
 
   return {
     id: messageId,
@@ -104,6 +116,82 @@ export async function sendMessage(
     burn_after_seconds: burnAfterSeconds,
     mentions: mentionsJson,
   };
+}
+
+export async function sendMessagesBatch(
+  db: D1Database,
+  conversationId: string,
+  senderId: string,
+  messagesOptions: SendMessageOptions[]
+): Promise<MessageRow[]> {
+  if (!messagesOptions || messagesOptions.length === 0) {
+    return [];
+  }
+
+  // 1. Check membership, blacklist, group mute, and individual mute ONCE for all messages
+  await assertCanSendMessage(db, conversationId, senderId);
+
+  const now = Date.now();
+  const statements: D1PreparedStatement[] = [];
+  const results: MessageRow[] = [];
+
+  for (let i = 0; i < messagesOptions.length; i++) {
+    const options = messagesOptions[i];
+    const type = options.type || 'text';
+    if (type === 'text' && (!options.content || !options.content.trim())) {
+      throw new Error(`Message at index ${i} has empty content for text message`);
+    }
+
+    const retention = options.retention || 'permanent';
+    const burnAfterSeconds = retention === 'on_read' ? Math.max(30, Number(options.burn_after_seconds) || 30) : null;
+    const mentionsList = Array.isArray(options.mentions)
+      ? options.mentions.map((m) => m.toLowerCase().trim()).filter(Boolean)
+      : [];
+    const mentionsJson = JSON.stringify(mentionsList);
+
+    const expiresInMs =
+      options.expires_in_seconds && options.expires_in_seconds > 0
+        ? options.expires_in_seconds * 1000
+        : 24 * 60 * 60 * 1000;
+
+    const msgCreatedAt = now + i;
+    const expiresAt = msgCreatedAt + expiresInMs;
+    const messageId = crypto.randomUUID();
+    const content = options.content ? options.content.trim() : null;
+
+    statements.push(
+      db.prepare(`
+        INSERT INTO messages (
+          id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds, mentions
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+      `).bind(messageId, conversationId, senderId, type, content, retention, expiresAt, msgCreatedAt, burnAfterSeconds, mentionsJson)
+    );
+
+    results.push({
+      id: messageId,
+      conversation_id: conversationId,
+      sender_id: senderId,
+      type,
+      content,
+      retention,
+      status: 'pending',
+      expires_at: expiresAt,
+      delivered_at: null,
+      read_at: null,
+      created_at: msgCreatedAt,
+      recalled_at: null,
+      burn_after_seconds: burnAfterSeconds,
+      mentions: mentionsJson,
+    });
+  }
+
+  statements.push(
+    db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now + messagesOptions.length, conversationId)
+  );
+
+  await db.batch(statements);
+
+  return results;
 }
 
 export async function getConversationMessages(
@@ -327,50 +415,113 @@ export async function acknowledgeDelivery(
 ): Promise<{ acknowledged: string[]; skipped: string[] }> {
   const acknowledged: string[] = [];
   const skipped: string[] = [];
+  if (!messageIds || messageIds.length === 0) {
+    return { acknowledged, skipped };
+  }
+
+  const uniqueIds = Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && id.trim())));
+  if (uniqueIds.length === 0) {
+    return { acknowledged, skipped };
+  }
+
   const now = Date.now();
+  const placeholders = uniqueIds.map(() => '?').join(',');
 
-  for (const id of messageIds) {
-    const msg = await db.prepare(`
-      SELECT m.id, m.conversation_id, m.sender_id, m.status
-      FROM messages m
-      JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
-      WHERE m.id = ?
-    `).bind(userId, id).first<{ id: string; conversation_id: string; sender_id: string; status: string }>();
+  // 1. Single query: Fetch all messages where current user is a member of the conversation
+  const query = `
+    SELECT m.id, m.conversation_id, m.sender_id, m.status
+    FROM messages m
+    JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
+    WHERE m.id IN (${placeholders})
+  `;
+  const res = await db.prepare(query).bind(userId, ...uniqueIds).all<{
+    id: string;
+    conversation_id: string;
+    sender_id: string;
+    status: string;
+  }>();
 
+  const foundMap = new Map<string, { id: string; conversation_id: string; sender_id: string; status: string }>();
+  for (const m of res.results) {
+    foundMap.set(m.id, m);
+  }
+
+  const validMessages: { id: string; conversation_id: string; sender_id: string; status: string }[] = [];
+  for (const id of uniqueIds) {
+    const msg = foundMap.get(id);
     if (!msg || msg.sender_id === userId) {
       skipped.push(id);
-      continue;
+    } else {
+      validMessages.push(msg);
+      acknowledged.push(id);
     }
+  }
 
-    await db.prepare(`
+  if (validMessages.length === 0) {
+    return { acknowledged, skipped };
+  }
+
+  // 2. Batch insert 'delivered' receipts for all valid messages
+  const receiptStatements: D1PreparedStatement[] = validMessages.map((m) =>
+    db.prepare(`
       INSERT OR IGNORE INTO message_receipts (id, message_id, user_id, status, timestamp)
       VALUES (?, ?, ?, 'delivered', ?)
-    `).bind(crypto.randomUUID(), id, userId, now).run();
+    `).bind(crypto.randomUUID(), m.id, userId, now)
+  );
 
-    // Calculate recipient count (all members in conversation except sender)
-    const memberRes = await db.prepare(`
-      SELECT COUNT(*) as count
-      FROM conversation_members
-      WHERE conversation_id = ? AND user_id != ?
-    `).bind(msg.conversation_id, msg.sender_id).first<{ count: number }>();
-    const recipientCount = memberRes?.count ?? 0;
+  // 3. Batch fetch conversation members for involved conversations
+  const convIds = Array.from(new Set(validMessages.map((m) => m.conversation_id)));
+  const convPlaceholders = convIds.map(() => '?').join(',');
+  const membersRes = await db.prepare(`
+    SELECT conversation_id, user_id
+    FROM conversation_members
+    WHERE conversation_id IN (${convPlaceholders})
+  `).bind(...convIds).all<{ conversation_id: string; user_id: string }>();
 
-    // Calculate delivered count
-    const receiptRes = await db.prepare(`
-      SELECT COUNT(DISTINCT user_id) as count
-      FROM message_receipts
-      WHERE message_id = ? AND status IN ('delivered', 'read')
-    `).bind(id).first<{ count: number }>();
-    const deliveredCount = receiptRes?.count ?? 0;
-
-    // Transition message status only when ALL recipients have received it
-    if (recipientCount > 0 && deliveredCount >= recipientCount && msg.status === 'pending') {
-      await db.prepare(`
-        UPDATE messages SET status = 'delivered', delivered_at = ? WHERE id = ?
-      `).bind(now, id).run();
+  const convMembersMap = new Map<string, Set<string>>();
+  for (const row of membersRes.results) {
+    if (!convMembersMap.has(row.conversation_id)) {
+      convMembersMap.set(row.conversation_id, new Set());
     }
+    convMembersMap.get(row.conversation_id)!.add(row.user_id);
+  }
 
-    acknowledged.push(id);
+  // Execute the receipt insertions in batch!
+  await db.batch(receiptStatements);
+
+  // 4. Batch query delivered counts for all valid messages
+  const validIds = validMessages.map((m) => m.id);
+  const validPlaceholders = validIds.map(() => '?').join(',');
+  const deliveredCountsRes = await db.prepare(`
+    SELECT message_id, COUNT(DISTINCT user_id) as count
+    FROM message_receipts
+    WHERE message_id IN (${validPlaceholders}) AND status IN ('delivered', 'read')
+    GROUP BY message_id
+  `).bind(...validIds).all<{ message_id: string; count: number }>();
+
+  const deliveredMap = new Map<string, number>();
+  for (const row of deliveredCountsRes.results) {
+    deliveredMap.set(row.message_id, row.count);
+  }
+
+  // 5. Batch transition message status to 'delivered' if all recipients have received it
+  const updateStatements: D1PreparedStatement[] = [];
+  for (const msg of validMessages) {
+    const membersSet = convMembersMap.get(msg.conversation_id);
+    const recipientCount = membersSet ? membersSet.size - (membersSet.has(msg.sender_id) ? 1 : 0) : 0;
+    const deliveredCount = deliveredMap.get(msg.id) ?? 0;
+
+    if (recipientCount > 0 && deliveredCount >= recipientCount && msg.status === 'pending') {
+      updateStatements.push(
+        db.prepare(`
+          UPDATE messages SET status = 'delivered', delivered_at = ? WHERE id = ?
+        `).bind(now, msg.id)
+      );
+    }
+  }
+
+  if (updateStatements.length > 0) {
+    await db.batch(updateStatements);
   }
 
   return { acknowledged, skipped };
@@ -386,101 +537,210 @@ export async function acknowledgeRead(
   const burned: string[] = [];
   const skipped: string[] = [];
   const burn_windows: Record<string, number> = {};
+
+  if (!messageIds || messageIds.length === 0) {
+    return { read, burned, skipped, burn_windows };
+  }
+
+  const uniqueIds = Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && id.trim())));
+  if (uniqueIds.length === 0) {
+    return { read, burned, skipped, burn_windows };
+  }
+
   const now = Date.now();
+  const placeholders = uniqueIds.map(() => '?').join(',');
 
-  for (const id of messageIds) {
-    const msg = await db.prepare(`
-      SELECT m.id, m.conversation_id, m.sender_id, m.retention, m.status, m.burn_after_seconds
-      FROM messages m
-      JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
-      WHERE m.id = ?
-    `).bind(userId, id).first<{
-      id: string;
-      conversation_id: string;
-      sender_id: string;
-      retention: 'permanent' | 'on_read';
-      status: string;
-      burn_after_seconds: number | null;
-    }>();
+  // 1. Single query: Fetch all messages where current user is a member of the conversation
+  const query = `
+    SELECT m.id, m.conversation_id, m.sender_id, m.retention, m.status, m.burn_after_seconds
+    FROM messages m
+    JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
+    WHERE m.id IN (${placeholders})
+  `;
+  const res = await db.prepare(query).bind(userId, ...uniqueIds).all<{
+    id: string;
+    conversation_id: string;
+    sender_id: string;
+    retention: 'permanent' | 'on_read';
+    status: string;
+    burn_after_seconds: number | null;
+  }>();
 
+  const foundMap = new Map<string, {
+    id: string;
+    conversation_id: string;
+    sender_id: string;
+    retention: 'permanent' | 'on_read';
+    status: string;
+    burn_after_seconds: number | null;
+  }>();
+  for (const m of res.results) {
+    foundMap.set(m.id, m);
+  }
+
+  const validMessages: {
+    id: string;
+    conversation_id: string;
+    sender_id: string;
+    retention: 'permanent' | 'on_read';
+    status: string;
+    burn_after_seconds: number | null;
+  }[] = [];
+
+  for (const id of uniqueIds) {
+    const msg = foundMap.get(id);
     if (!msg || msg.sender_id === userId) {
       skipped.push(id);
-      continue;
+    } else {
+      validMessages.push(msg);
     }
+  }
 
-    await db.prepare(`
-      UPDATE conversation_members SET last_read_message_id = ? WHERE conversation_id = ? AND user_id = ?
-    `).bind(id, msg.conversation_id, userId).run();
+  if (validMessages.length === 0) {
+    return { read, burned, skipped, burn_windows };
+  }
 
-    // Ensure both delivered and read receipts are recorded
-    await db.prepare(`
-      INSERT OR IGNORE INTO message_receipts (id, message_id, user_id, status, timestamp)
-      VALUES (?, ?, ?, 'delivered', ?)
-    `).bind(crypto.randomUUID(), id, userId, now).run();
+  // 2. Batch update conversation_members.last_read_message_id for each conversation involved
+  const convLastMsgMap = new Map<string, string>();
+  for (const m of validMessages) {
+    convLastMsgMap.set(m.conversation_id, m.id);
+  }
 
-    await db.prepare(`
-      INSERT OR IGNORE INTO message_receipts (id, message_id, user_id, status, timestamp)
-      VALUES (?, ?, ?, 'read', ?)
-    `).bind(crypto.randomUUID(), id, userId, now).run();
+  const initialBatchStmts: D1PreparedStatement[] = [];
+  for (const [convId, lastMsgId] of convLastMsgMap.entries()) {
+    initialBatchStmts.push(
+      db.prepare(`
+        UPDATE conversation_members SET last_read_message_id = ? WHERE conversation_id = ? AND user_id = ?
+      `).bind(lastMsgId, convId, userId)
+    );
+  }
 
-    // Calculate recipient count (all members except sender)
-    const memberRes = await db.prepare(`
-      SELECT COUNT(*) as count
-      FROM conversation_members
-      WHERE conversation_id = ? AND user_id != ?
-    `).bind(msg.conversation_id, msg.sender_id).first<{ count: number }>();
-    const recipientCount = memberRes?.count ?? 0;
+  // 3. Batch insert 'delivered' and 'read' receipts
+  for (const m of validMessages) {
+    initialBatchStmts.push(
+      db.prepare(`
+        INSERT OR IGNORE INTO message_receipts (id, message_id, user_id, status, timestamp)
+        VALUES (?, ?, ?, 'delivered', ?)
+      `).bind(crypto.randomUUID(), m.id, userId, now)
+    );
+    initialBatchStmts.push(
+      db.prepare(`
+        INSERT OR IGNORE INTO message_receipts (id, message_id, user_id, status, timestamp)
+        VALUES (?, ?, ?, 'read', ?)
+      `).bind(crypto.randomUUID(), m.id, userId, now)
+    );
+  }
 
-    // Calculate read count
-    const readReceiptRes = await db.prepare(`
-      SELECT COUNT(DISTINCT user_id) as count
-      FROM message_receipts
-      WHERE message_id = ? AND status = 'read'
-    `).bind(id).first<{ count: number }>();
-    const readCount = readReceiptRes?.count ?? 0;
+  await db.batch(initialBatchStmts);
 
-    // Calculate delivered count
-    const deliveredReceiptRes = await db.prepare(`
-      SELECT COUNT(DISTINCT user_id) as count
-      FROM message_receipts
-      WHERE message_id = ? AND status IN ('delivered', 'read')
-    `).bind(id).first<{ count: number }>();
-    const deliveredCount = deliveredReceiptRes?.count ?? 0;
+  // 4. Batch fetch conversation members
+  const convIds = Array.from(new Set(validMessages.map((m) => m.conversation_id)));
+  const convPlaceholders = convIds.map(() => '?').join(',');
+  const membersRes = await db.prepare(`
+    SELECT conversation_id, user_id
+    FROM conversation_members
+    WHERE conversation_id IN (${convPlaceholders})
+  `).bind(...convIds).all<{ conversation_id: string; user_id: string }>();
+
+  const convMembersMap = new Map<string, Set<string>>();
+  for (const row of membersRes.results) {
+    if (!convMembersMap.has(row.conversation_id)) {
+      convMembersMap.set(row.conversation_id, new Set());
+    }
+    convMembersMap.get(row.conversation_id)!.add(row.user_id);
+  }
+
+  // 5. Batch fetch delivered and read counts in a single query
+  const validIds = validMessages.map((m) => m.id);
+  const validPlaceholders = validIds.map(() => '?').join(',');
+  const receiptCountsRes = await db.prepare(`
+    SELECT
+      message_id,
+      COUNT(DISTINCT user_id) AS delivered_count,
+      COUNT(DISTINCT CASE WHEN status = 'read' THEN user_id END) AS read_count
+    FROM message_receipts
+    WHERE message_id IN (${validPlaceholders}) AND status IN ('delivered', 'read')
+    GROUP BY message_id
+  `).bind(...validIds).all<{ message_id: string; delivered_count: number; read_count: number }>();
+
+  const countsMap = new Map<string, { delivered_count: number; read_count: number }>();
+  for (const r of receiptCountsRes.results) {
+    countsMap.set(r.message_id, {
+      delivered_count: r.delivered_count,
+      read_count: r.read_count,
+    });
+  }
+
+  // 6. Check status transitions
+  const updateStmts: D1PreparedStatement[] = [];
+  const onReadCandidates: string[] = [];
+
+  for (const msg of validMessages) {
+    const membersSet = convMembersMap.get(msg.conversation_id);
+    const recipientCount = membersSet ? membersSet.size - (membersSet.has(msg.sender_id) ? 1 : 0) : 0;
+    const counts = countsMap.get(msg.id) ?? { delivered_count: 0, read_count: 0 };
+    const deliveredCount = counts.delivered_count;
+    const readCount = counts.read_count;
 
     const allDelivered = recipientCount > 0 && deliveredCount >= recipientCount;
     const allRead = recipientCount > 0 && readCount >= recipientCount;
 
     if (allDelivered && msg.status === 'pending') {
-      await db.prepare(`
-        UPDATE messages SET status = 'delivered', delivered_at = COALESCE(delivered_at, ?) WHERE id = ?
-      `).bind(now, id).run();
+      updateStmts.push(
+        db.prepare(`
+          UPDATE messages SET status = 'delivered', delivered_at = COALESCE(delivered_at, ?) WHERE id = ?
+        `).bind(now, msg.id)
+      );
     }
 
     if (msg.retention === 'on_read') {
-      // Burn on read: allow viewing for at least 30s.
-      // Physical destruction delays until all recipients read AND all viewing windows elapse.
       const burnWindowSeconds = msg.burn_after_seconds ?? 30;
-      burn_windows[id] = burnWindowSeconds;
-      const burnWindowMs = burnWindowSeconds * 1000;
+      burn_windows[msg.id] = burnWindowSeconds;
       if (allRead) {
-        const latestReadRes = await db.prepare(`
-          SELECT MAX(timestamp) as latest_read
-          FROM message_receipts
-          WHERE message_id = ? AND status = 'read'
-        `).bind(id).first<{ latest_read: number | null }>();
-        const latestRead = latestReadRes?.latest_read ?? now;
-        if (now - latestRead >= burnWindowMs) {
-          await destroyMessage(db, r2, id);
-        }
+        onReadCandidates.push(msg.id);
       }
-      burned.push(id);
+      burned.push(msg.id);
     } else {
       if (allRead && msg.status !== 'read') {
-        await db.prepare(`
-          UPDATE messages SET status = 'read', read_at = ? WHERE id = ?
-        `).bind(now, id).run();
+        updateStmts.push(
+          db.prepare(`
+            UPDATE messages SET status = 'read', read_at = ? WHERE id = ?
+          `).bind(now, msg.id)
+        );
       }
-      read.push(id);
+      read.push(msg.id);
+    }
+  }
+
+  if (updateStmts.length > 0) {
+    await db.batch(updateStmts);
+  }
+
+  // 7. Check destruction for on_read messages that are allRead
+  if (onReadCandidates.length > 0) {
+    const candidatePlaceholders = onReadCandidates.map(() => '?').join(',');
+    const latestReadRes = await db.prepare(`
+      SELECT message_id, MAX(timestamp) as latest_read
+      FROM message_receipts
+      WHERE message_id IN (${candidatePlaceholders}) AND status = 'read'
+      GROUP BY message_id
+    `).bind(...onReadCandidates).all<{ message_id: string; latest_read: number | null }>();
+
+    const latestReadMap = new Map<string, number>();
+    for (const r of latestReadRes.results) {
+      if (r.latest_read !== null) {
+        latestReadMap.set(r.message_id, r.latest_read);
+      }
+    }
+
+    for (const id of onReadCandidates) {
+      const msg = foundMap.get(id);
+      const burnWindowSeconds = msg?.burn_after_seconds ?? 30;
+      const burnWindowMs = burnWindowSeconds * 1000;
+      const latestRead = latestReadMap.get(id) ?? now;
+      if (now - latestRead >= burnWindowMs) {
+        await destroyMessage(db, r2, id);
+      }
     }
   }
 
@@ -618,11 +878,13 @@ export async function recallMessage(
 
   await destroyMediaOnly(db, r2, messageId);
 
-  await db.prepare(
+  const updateMsgStmt = db.prepare(
     "UPDATE messages SET recalled_at = ?, content = '[Message recalled]' WHERE id = ?"
-  ).bind(now, messageId).run();
+  ).bind(now, messageId);
 
-  await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, msg.conversation_id).run();
+  const updateConvStmt = db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, msg.conversation_id);
+
+  await db.batch([updateMsgStmt, updateConvStmt]);
 
   return {
     success: true,

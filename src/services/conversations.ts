@@ -135,17 +135,19 @@ export async function getOrCreateDirectConversation(
   // Create new deterministic direct conversation
   const now = Date.now();
 
-  await db.prepare(
+  const convStmt = db.prepare(
     'INSERT INTO conversations (id, type, owner_address, name, metadata, is_muted, mute_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)'
-  ).bind(convId, 'direct', null, null, '{}', now, now).run();
+  ).bind(convId, 'direct', null, null, '{}', now, now);
 
-  await db.prepare(
+  const m1Stmt = db.prepare(
     'INSERT OR IGNORE INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(`${convId}:${currentUserId}`, convId, currentUserId, 'member', now).run();
+  ).bind(`${convId}:${currentUserId}`, convId, currentUserId, 'member', now);
 
-  await db.prepare(
+  const m2Stmt = db.prepare(
     'INSERT OR IGNORE INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(`${convId}:${targetUser.id}`, convId, targetUser.id, 'member', now).run();
+  ).bind(`${convId}:${targetUser.id}`, convId, targetUser.id, 'member', now);
+
+  await db.batch([convStmt, m1Stmt, m2Stmt]);
 
   return getConversation(db, convId, currentUserId);
 }
@@ -283,13 +285,19 @@ export async function createGroup(
     meta.marquee = { enabled: false, text: options.description };
   }
 
-  await db.prepare(
-    'INSERT INTO conversations (id, type, owner_address, name, metadata, is_muted, mute_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)'
-  ).bind(convId, 'group', creator.id, trimmedName, JSON.stringify(meta), now, now).run();
+  const batchStatements: D1PreparedStatement[] = [];
 
-  await db.prepare(
-    'INSERT INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(`${convId}:${creator.id}`, convId, creator.id, 'owner', now).run();
+  batchStatements.push(
+    db.prepare(
+      'INSERT INTO conversations (id, type, owner_address, name, metadata, is_muted, mute_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)'
+    ).bind(convId, 'group', creator.id, trimmedName, JSON.stringify(meta), now, now)
+  );
+
+  batchStatements.push(
+    db.prepare(
+      'INSERT INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
+    ).bind(`${convId}:${creator.id}`, convId, creator.id, 'owner', now)
+  );
 
   const seenUsers = new Set<string>([creator.id]);
   for (const identifier of memberIdentifiers) {
@@ -297,14 +305,18 @@ export async function createGroup(
       const user = await findOrCreateUser(db, identifier);
       if (user && !seenUsers.has(user.id)) {
         seenUsers.add(user.id);
-        await db.prepare(
-          'INSERT OR IGNORE INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-        ).bind(`${convId}:${user.id}`, convId, user.id, 'member', now).run();
+        batchStatements.push(
+          db.prepare(
+            'INSERT OR IGNORE INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
+          ).bind(`${convId}:${user.id}`, convId, user.id, 'member', now)
+        );
       }
     } catch {
       // Ignore unknown non-address member identifiers gracefully
     }
   }
+
+  await db.batch(batchStatements);
 
   return getConversation(db, convId, creator.id);
 }

@@ -76,20 +76,22 @@ export async function uploadVoiceMessage(
     },
   });
 
-  // 6. Save message and voice metadata in D1
-  await db.prepare(`
+  // 6. Save message and voice metadata in D1 in a single atomic batch
+  const msgStmt = db.prepare(`
     INSERT INTO messages (
       id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds
     ) VALUES (?, ?, ?, 'voice', ?, ?, 'pending', ?, ?, ?)
-  `).bind(messageId, params.conversation_id, senderId, `[Voice: ${duration}s]`, retention, expiresAt, now, burnAfterSeconds).run();
+  `).bind(messageId, params.conversation_id, senderId, `[Voice: ${duration}s]`, retention, expiresAt, now, burnAfterSeconds);
 
-  await db.prepare(`
+  const voiceStmt = db.prepare(`
     INSERT INTO voice_messages (
       id, message_id, object_key, duration, mime_type, size, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).bind(voiceId, messageId, objectKey, duration, normalizedMime, byteLength, now).run();
+  `).bind(voiceId, messageId, objectKey, duration, normalizedMime, byteLength, now);
 
-  await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, params.conversation_id).run();
+  const convStmt = db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, params.conversation_id);
+
+  await db.batch([msgStmt, voiceStmt, convStmt]);
 
   const message: MessageRow = {
     id: messageId,

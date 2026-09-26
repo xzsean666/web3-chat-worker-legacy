@@ -650,6 +650,64 @@ export const GroupTopMarqueeBanner: React.FC<GroupBannerProps> = ({ metadata }) 
   }
   ```
 
+### 6.1.1 批量发送多条消息 (Batch Send Messages)
+
+在高频聊天或连发多条短句时，前端无需发起多次并发 HTTP 请求，可使用批量发送接口通过单次请求原子提交多条消息：
+
+- **接口路径**：`POST WORKER_BASE_URL/conversations/:id/messages/batch`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`
+- **请求体 (Content-Type: application/json)**：
+  ```json
+  {
+    "messages": [
+      { "content": "第一条消息" },
+      { "content": "第二条消息" },
+      { "content": "第三条消息（阅后即焚）", "retention": "on_read", "burn_after_seconds": 30 }
+    ]
+  }
+  ```
+- **成功响应 (`HTTP 201`)**：
+  ```json
+  {
+    "messages": [
+      {
+        "id": "uuid-1",
+        "conversation_id": "direct:0x1610...:0x2c3d...",
+        "sender_id": "0x1610...",
+        "type": "text",
+        "content": "第一条消息",
+        "retention": "permanent",
+        "status": "pending",
+        "expires_at": 1788674257000,
+        "created_at": 1788587857000
+      },
+      {
+        "id": "uuid-2",
+        "conversation_id": "direct:0x1610...:0x2c3d...",
+        "sender_id": "0x1610...",
+        "type": "text",
+        "content": "第二条消息",
+        "retention": "permanent",
+        "status": "pending",
+        "expires_at": 1788674257000,
+        "created_at": 1788587857001
+      },
+      {
+        "id": "uuid-3",
+        "conversation_id": "direct:0x1610...:0x2c3d...",
+        "sender_id": "0x1610...",
+        "type": "text",
+        "content": "第三条消息（阅后即焚）",
+        "retention": "on_read",
+        "status": "pending",
+        "expires_at": 1788674257000,
+        "burn_after_seconds": 30,
+        "created_at": 1788587857002
+      }
+    ]
+  }
+  ```
+
 ### 6.2 基于游标的分页拉取会话历史消息
 
 - **接口路径**：`GET WORKER_BASE_URL/conversations/:id/messages`
