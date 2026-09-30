@@ -8,7 +8,7 @@ import type {
   UserRow,
 } from '../db/schema';
 import { isGroupLike } from '../db/schema';
-import { normalizeAddress } from '../db';
+import { normalizeAddress, chunkArray } from '../db';
 import { ALLOWED_AVATAR_MIME_TYPES, MAX_AVATAR_SIZE_BYTES, type UploadAvatarOptions } from './users';
 import { FREE_CAPACITY, GroupCapacityError, computeNextTier, insertMemberWithCapacity } from './payments/capacity';
 import { isMemberWallet } from './payments/config';
@@ -405,20 +405,22 @@ export async function getOrCreateDirectConversation(
     return getConversation(db, convId, currentUserId);
   }
 
-  // Create new deterministic direct conversation
+  // Create new deterministic direct conversation atomically via batch
   const now = Date.now();
 
-  await db.prepare(
+  const convStmt = db.prepare(
     'INSERT INTO conversations (id, type, owner_address, name, metadata, is_muted, mute_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)'
-  ).bind(convId, 'direct', null, null, '{}', now, now).run();
+  ).bind(convId, 'direct', null, null, '{}', now, now);
 
-  await db.prepare(
+  const m1Stmt = db.prepare(
     'INSERT OR IGNORE INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(`${convId}:${currentUserId}`, convId, currentUserId, 'member', now).run();
+  ).bind(`${convId}:${currentUserId}`, convId, currentUserId, 'member', now);
 
-  await db.prepare(
+  const m2Stmt = db.prepare(
     'INSERT OR IGNORE INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(`${convId}:${targetUser.id}`, convId, targetUser.id, 'member', now).run();
+  ).bind(`${convId}:${targetUser.id}`, convId, targetUser.id, 'member', now);
+
+  await db.batch([convStmt, m1Stmt, m2Stmt]);
 
   return getConversation(db, convId, currentUserId);
 }
@@ -607,18 +609,26 @@ export async function createGroup(
   }
 
   // club 固定 group_type='public'（发现页只覆盖 public club；group_type 列对 club 无用户语义，不接受入参）
-  await db.prepare(
-    'INSERT INTO conversations (id, type, owner_address, name, metadata, is_muted, mute_until, group_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)'
-  ).bind(convId, convType, creator.id, trimmedName, JSON.stringify(meta), convType === 'club' ? 'public' : 'private', now, now).run();
-
-  await db.prepare(
-    'INSERT INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(`${convId}:${creator.id}`, convId, creator.id, 'owner', now).run();
+  const stmts: D1PreparedStatement[] = [
+    db.prepare(
+      'INSERT INTO conversations (id, type, owner_address, name, metadata, is_muted, mute_until, group_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)'
+    ).bind(convId, convType, creator.id, trimmedName, JSON.stringify(meta), convType === 'club' ? 'public' : 'private', now, now),
+    db.prepare(
+      'INSERT INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
+    ).bind(`${convId}:${creator.id}`, convId, creator.id, 'owner', now),
+  ];
 
   for (const userId of resolvedMemberIds) {
-    await db.prepare(
-      'INSERT OR IGNORE INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
-    ).bind(`${convId}:${userId}`, convId, userId, 'member', now).run();
+    stmts.push(
+      db.prepare(
+        'INSERT OR IGNORE INTO conversation_members (id, conversation_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)'
+      ).bind(`${convId}:${userId}`, convId, userId, 'member', now)
+    );
+  }
+
+  const chunks = chunkArray(stmts, 50);
+  for (const chunk of chunks) {
+    await db.batch(chunk);
   }
 
   return getConversation(db, convId, creator.id);
@@ -859,12 +869,11 @@ export async function removeGroupMember(
       return { success: true, message: 'Group deleted as owner left' };
     }
 
-    await db.prepare(
-      'DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
-    ).bind(conversationId, targetId).run();
-
     const now = Date.now();
-    await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId).run();
+    await db.batch([
+      db.prepare('DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?').bind(conversationId, targetId),
+      db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId),
+    ]);
 
     return { success: true, message: 'Left group successfully' };
   }
@@ -880,12 +889,11 @@ export async function removeGroupMember(
     }
   }
 
-  await db.prepare(
-    'DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
-  ).bind(conversationId, targetId).run();
-
   const now = Date.now();
-  await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId).run();
+  await db.batch([
+    db.prepare('DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?').bind(conversationId, targetId),
+    db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId),
+  ]);
 
   return { success: true, message: 'Member removed successfully' };
 }
@@ -930,15 +938,16 @@ export async function updateMemberRole(
 
   const now = Date.now();
   // Promoting to admin automatically un-mutes
-  await db.prepare(`
-    UPDATE conversation_members
-    SET role = ?,
-        muted_until = CASE WHEN ? = 'admin' THEN NULL ELSE muted_until END,
-        mute_reason = CASE WHEN ? = 'admin' THEN NULL ELSE mute_reason END
-    WHERE conversation_id = ? AND user_id = ?
-  `).bind(role, role, role, conversationId, targetUser.id).run();
-
-  await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId).run();
+  await db.batch([
+    db.prepare(`
+      UPDATE conversation_members
+      SET role = ?,
+          muted_until = CASE WHEN ? = 'admin' THEN NULL ELSE muted_until END,
+          mute_reason = CASE WHEN ? = 'admin' THEN NULL ELSE mute_reason END
+      WHERE conversation_id = ? AND user_id = ?
+    `).bind(role, role, role, conversationId, targetUser.id),
+    db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId),
+  ]);
 
   return {
     ...targetMember,
@@ -1051,15 +1060,17 @@ export async function createGroupJoinRequest(
     handled_at: null,
   };
 
-  await db.prepare(`
-    INSERT INTO group_join_requests (
-      id, group_id, user_id, wallet_address, nickname, avatar_url, message, status, created_at, handled_by, handled_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL)
-  `).bind(
-    request.id, request.group_id, request.user_id, request.wallet_address, request.nickname,
-    request.avatar_url, request.message, request.created_at
-  ).run();
-  await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId).run();
+  await db.batch([
+    db.prepare(`
+      INSERT INTO group_join_requests (
+        id, group_id, user_id, wallet_address, nickname, avatar_url, message, status, created_at, handled_by, handled_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL)
+    `).bind(
+      request.id, request.group_id, request.user_id, request.wallet_address, request.nickname,
+      request.avatar_url, request.message, request.created_at
+    ),
+    db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId),
+  ]);
   await sendGroupSystemEvent(db, conversationId, applicant.id, {
     event: 'join_request_created',
     request_id: request.id,
@@ -1581,11 +1592,12 @@ export async function setMemberMute(
     muteReason = options.reason || null;
   }
 
-  await db.prepare(
-    'UPDATE conversation_members SET muted_until = ?, mute_reason = ? WHERE conversation_id = ? AND user_id = ?'
-  ).bind(mutedUntil, muteReason, conversationId, targetUser.id).run();
-
-  await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId).run();
+  await db.batch([
+    db.prepare(
+      'UPDATE conversation_members SET muted_until = ?, mute_reason = ? WHERE conversation_id = ? AND user_id = ?'
+    ).bind(mutedUntil, muteReason, conversationId, targetUser.id),
+    db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId),
+  ]);
 
   return {
     conversation_id: conversationId,

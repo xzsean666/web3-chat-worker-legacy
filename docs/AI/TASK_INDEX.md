@@ -19,5 +19,6 @@
 | [TASK-015](tasks/TASK-015.md) | 30-Second Message Recall & 30-Second Burn-on-Read Viewing Window | TASK-014 | DONE | Configurable 30s message recall, R2 media purge on recall, 30s minimum burn-on-read viewing window |
 | [TASK-016](tasks/TASK-016.md) | Social System: Friends List, Friend Tagging & Blacklist Enforcement | TASK-015 | DONE | Friends management, friend tags, blacklist management, 1:1 chat block enforcement, and message mentions |
 | [TASK-017](tasks/TASK-017.md) | Group Metadata, Moderation (Mute System), Owner Kick, Member Leave & Admin Privileges | TASK-016 | DONE | Group metadata (name, intro, top marquee), group/member mute ("admin始终可以讲话"), owner kick, self leave |
+| [TASK-018](tasks/TASK-018.md) | D1 Write Batching & Auto-Batching Engine Optimization | TASK-017 | DONE | D1WriteBatcher, withAutoBatch transparent proxy, RYOW pre-flush, statement chunking, and service batch writes |
 
 

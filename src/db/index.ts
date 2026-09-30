@@ -1,4 +1,6 @@
 export * from './schema';
+export * from './chunker';
+export * from './batcher';
 
 /**
  * Normalizes an EVM address to lowercase.

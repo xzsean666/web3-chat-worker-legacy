@@ -100,8 +100,12 @@ export class MockD1Database {
   async batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> {
     const results: D1Result<T>[] = [];
     for (const stmt of statements) {
-      const res = await stmt.all<T>();
-      results.push(res);
+      const mock = stmt as any;
+      if (mock.sql && /^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(mock.sql)) {
+        results.push(await mock.run());
+      } else {
+        results.push(await stmt.all<T>());
+      }
     }
     return results;
   }

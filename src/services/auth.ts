@@ -84,18 +84,19 @@ export async function verifySignatureAndLogin(
     throw new Error('Invalid signature');
   }
 
-  // Delete used nonce immediately (single-use)
-  await db.prepare('DELETE FROM nonces WHERE id = ?').bind(nonceRow.id).run();
+  // Prepare batch statements for atomic commit
+  const deleteNonceStmt = db.prepare('DELETE FROM nonces WHERE id = ?').bind(nonceRow.id);
 
   // Find or create user: Address as User ID
   let user = await db.prepare(
     'SELECT * FROM users WHERE wallet_address = ? OR id = ?'
   ).bind(walletAddress, walletAddress).first<UserRow>();
 
+  let createUserStmt: D1PreparedStatement | null = null;
   if (!user) {
-    await db.prepare(
+    createUserStmt = db.prepare(
       'INSERT INTO users (id, wallet_address, public_metadata, private_metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
-    ).bind(walletAddress, walletAddress, '{}', '{}', now, now).run();
+    ).bind(walletAddress, walletAddress, '{}', '{}', now, now);
 
     user = {
       id: walletAddress,
@@ -119,9 +120,17 @@ export async function verifySignatureAndLogin(
   const sessionId = crypto.randomUUID();
   const sessionExpiresAt = now + 30 * 24 * 60 * 60 * 1000; // 30 days
 
-  await db.prepare(
+  const createSessionStmt = db.prepare(
     'INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(sessionId, user.id, tokenHash, sessionExpiresAt, now).run();
+  ).bind(sessionId, user.id, tokenHash, sessionExpiresAt, now);
+
+  const batchStmts: D1PreparedStatement[] = [deleteNonceStmt];
+  if (createUserStmt) {
+    batchStmts.push(createUserStmt);
+  }
+  batchStmts.push(createSessionStmt);
+
+  await db.batch(batchStmts);
 
   const session: SessionRow = {
     id: sessionId,

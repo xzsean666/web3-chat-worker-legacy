@@ -4,7 +4,7 @@
 Build a high-performance, single-node Cloudflare Worker Web3 Chat MVP supporting EVM wallet signature login, direct/group chat, text and voice messaging, explicit delivery ACK, burn-on-read, voice destruction (R2), and incremental sync.
 
 ## Current Task
-TASK-017: Group Metadata, Moderation (Mute System), Owner Kick, Member Leave & Admin Privileges
+TASK-018: D1 Write Batching & Auto-Batching Engine Optimization
 
 ## Current Status
 DONE
@@ -103,38 +103,31 @@ DONE
 - TASK-017: Deployed to Cloudflare Worker (Version `5c31d3be-8b2e-4d73-a714-0370d64c2bb7`).
 - TASK-017: Executed `pnpm run test:live` against live production URL `https://web3-chat-worker.002788.xyz` with 17/17 steps passing.
 - TASK-017: Updated `docs/FRONTEND_INTEGRATION.md` with marquee React/Vue component example, SDK methods, and updated `README.md`, `docs/AI/ARCHITECTURE.md`, `docs/AI/DECISIONS.md` (ADR-011).
+- TASK-018: Implemented `src/db/chunker.ts` providing statement/parameter chunking (`chunkArray`, `chunkByParamCount`, `D1_MAX_PARAMS_LIMIT = 100`, `D1_SAFE_BATCH_CHUNK = 50`).
+- TASK-018: Implemented `src/db/batcher.ts` providing `D1WriteBatcher` (in-memory micro-batch write buffer), `withAutoBatch` (transparent D1 proxy with strict Read-Your-Own-Writes auto-flush), and `ctx.waitUntil` background drain guard.
+- TASK-018: Mounted Auto-Batch middleware in `src/index.ts` to automatically coalesce discrete mutations per request/isolate and flush on request completion.
+- TASK-018: Optimized multi-statement writes in `auth.ts`, `conversations.ts`, and `friendRequests.ts` to atomic `db.batch([stmt1, stmt2, ...])`.
+- TASK-018: Created `test/batcher.test.ts` (16 unit tests) and verified entire test suite (44/44 test files, 365/365 tests passing).
 
 ## Modified Files
-- `migrations/0005_group_metadata_and_moderation.sql`
-- `src/db/schema.ts`
-- `src/types.ts`
+- `src/db/chunker.ts` (new)
+- `src/db/batcher.ts` (new)
+- `src/db/index.ts`
+- `src/index.ts`
+- `src/services/auth.ts`
 - `src/services/conversations.ts`
-- `src/services/messages.ts`
-- `src/services/voice.ts`
-- `src/services/images.ts`
-- `src/services/files.ts`
-- `src/routes/groups.ts`
-- `src/routes/messages.ts`
-- `src/routes/voice.ts`
-- `src/routes/images.ts`
-- `src/routes/files.ts`
+- `src/services/friendRequests.ts`
+- `test/batcher.test.ts` (new)
 - `test/helpers/db.ts`
-- `test/group_features.test.ts`
-- `scripts/live-e2e.ts`
-- `docs/FRONTEND_INTEGRATION.md`
-- `README.md`
-- `docs/AI/ARCHITECTURE.md`
-- `docs/AI/DECISIONS.md`
-- `docs/AI/tasks/TASK-017.md`
+- `test/internal_admin.test.ts`
+- `docs/DATABASE_BATCHING_RULES.md` (new)
+- `docs/AI/tasks/TASK-018.md`
 - `docs/AI/TASK_INDEX.md`
 - `docs/AI/SESSION_STATE.md`
 
 ## Verification Commands & Results
 - `pnpm run typecheck`: Success (zero type errors across all source and test files).
-- `pnpm test`: Success (77/77 tests passing across 15 test suites with 100% pass rate).
-- `pnpm wrangler d1 migrations apply web3_chat_db --remote`: Successfully applied migration `0005_group_metadata_and_moderation.sql` to remote D1.
-- `pnpm wrangler deploy`: Successfully deployed to Cloudflare Worker (Version `5c31d3be-8b2e-4d73-a714-0370d64c2bb7`).
-- `pnpm run test:live`: Success (17/17 steps passed against live production endpoint `https://web3-chat-worker.002788.xyz` covering Auth, 1:1 Chat, Group RBAC, Voice/Image/File upload & streaming, 30s burn-on-read grace window, batch ACK, TTL cleanup, dual-metadata & avatar, 30s recall with R2 purge, social friends & tags, blacklist enforcement & 403 chat rejection, group metadata, marquee scrolling, group mute, individual member mute, admin speech invariance, member kick, and voluntary leave).
+- `pnpm test`: Success (44/44 test files passing, 367/367 tests passing with 100% pass rate).
 
 ## Unresolved Issues
 None.

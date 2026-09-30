@@ -258,17 +258,24 @@ export async function acceptFriendRequest(
   const now = Date.now();
 
   // Establish the contact relationship in BOTH directions so direct chat works
+  const batchStmts: D1PreparedStatement[] = [];
   for (const [owner, friend] of [[user, request.from_user_id], [request.from_user_id, user]]) {
-    await db.prepare(`
-      INSERT INTO friends (id, user_id, friend_address, alias, tags, created_at, updated_at)
-      VALUES (?, ?, ?, NULL, '[]', ?, ?)
-      ON CONFLICT(user_id, friend_address) DO UPDATE SET updated_at = excluded.updated_at
-    `).bind(`${owner}:${friend}`, owner, friend, now, now).run();
+    batchStmts.push(
+      db.prepare(`
+        INSERT INTO friends (id, user_id, friend_address, alias, tags, created_at, updated_at)
+        VALUES (?, ?, ?, NULL, '[]', ?, ?)
+        ON CONFLICT(user_id, friend_address) DO UPDATE SET updated_at = excluded.updated_at
+      `).bind(`${owner}:${friend}`, owner, friend, now, now)
+    );
   }
 
-  await db.prepare(
-    "UPDATE friend_requests SET status = 'accepted', is_read = 1, updated_at = ? WHERE id = ?"
-  ).bind(now, requestId).run();
+  batchStmts.push(
+    db.prepare(
+      "UPDATE friend_requests SET status = 'accepted', is_read = 1, updated_at = ? WHERE id = ?"
+    ).bind(now, requestId)
+  );
+
+  await db.batch(batchStmts);
 
   return { success: true, friend_address: request.from_user_id };
 }

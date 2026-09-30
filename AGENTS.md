@@ -19,3 +19,4 @@
 - Explicit ACK model: HTTP 200 is only an API receipt; delivery requires active ACK from receiver client.
 - Expiration and burn-on-read strictly clean up D1 and R2 together.
 - Support incremental sync (cursor/since_id) for optimal client pull performance.
+- D1 Database Write Rules: All mutations automatically route through the in-memory Auto-Batching engine (D1WriteBatcher). Follow guidelines in `docs/DATABASE_BATCHING_RULES.md`.

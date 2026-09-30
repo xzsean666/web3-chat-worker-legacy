@@ -476,9 +476,10 @@ describe('internal admin report review', () => {
 
   it('lists reports with status/target_type filters and group info', async () => {
     await seedFixtures();
-    const userReport = await insertReport({ status: 'received' });
-    const groupReport = await insertReport({ target_type: 'group', status: 'received', created_at: Date.now() + 1 });
-    await insertReport({ status: 'resolved' });
+    const baseNow = Date.now();
+    const userReport = await insertReport({ status: 'received', created_at: baseNow - 200 });
+    const groupReport = await insertReport({ target_type: 'group', status: 'received', created_at: baseNow });
+    await insertReport({ status: 'resolved', created_at: baseNow - 100 });
 
     const all = await call('GET', '/internal/admin/reports');
     expect(all.status).toBe(200);

@@ -28,9 +28,31 @@ import { dividendIndexerEnabled } from './services/dividends/chain';
 import { runPaymentsTick } from './services/payments/tick';
 import { runStorageLifecycle } from './services/storageLifecycle';
 
+import { withAutoBatch, isAutoBatchD1 } from './db';
+
 const app = new Hono<AppEnv>();
 
 app.use('*', cors());
+
+// 数据库自动微批写入（Auto-Batch）中间件：跨请求/微任务防抖合并写入，保障读写一致性（RYOW）
+app.use('*', async (c, next) => {
+  if (c.env?.DB && !isAutoBatchD1(c.env.DB)) {
+    let ctx: ExecutionContext | undefined;
+    try {
+      ctx = c.executionCtx as unknown as ExecutionContext;
+    } catch {
+      // In unit tests with app.request(), executionCtx is not attached
+    }
+    c.env.DB = withAutoBatch(c.env.DB, { ctx });
+  }
+  try {
+    await next();
+  } finally {
+    if (c.env?.DB && isAutoBatchD1(c.env.DB) && c.env.DB.pendingBatchCount > 0) {
+      await c.env.DB.flush();
+    }
+  }
+});
 
 // 统一错误出口：服务端记录完整错误，客户端只拿到通用文案（不泄漏内部细节）。
 app.onError((err, c) => {
@@ -81,21 +103,34 @@ export { app };
 let lastStorageLifecycleHour = -1;
 
 export default {
-  fetch: app.fetch,
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    if (env?.DB && !isAutoBatchD1(env.DB)) {
+      env.DB = withAutoBatch(env.DB, { ctx });
+    }
+    try {
+      return await app.fetch(request, env, ctx);
+    } finally {
+      if (env?.DB && isAutoBatchD1(env.DB) && env.DB.pendingBatchCount > 0) {
+        await env.DB.flush();
+      }
+    }
+  },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    const tasks: Promise<unknown>[] = [sweepExpiredMessages(env.DB, env.VOICE_BUCKET), runPaymentsTick(env)];
-    if (dividendIndexerEnabled(env)) {
-      tasks.push(runDividendIndexTick(env));
+    const db = withAutoBatch(env.DB, { ctx });
+    const scheduledEnv: Env = { ...env, DB: db };
+    const tasks: Promise<unknown>[] = [sweepExpiredMessages(db, env.VOICE_BUCKET), runPaymentsTick(scheduledEnv)];
+    if (dividendIndexerEnabled(scheduledEnv)) {
+      tasks.push(runDividendIndexTick(scheduledEnv));
     }
     const hour = Math.floor(Date.now() / 3_600_000);
     if (hour !== lastStorageLifecycleHour) {
       lastStorageLifecycleHour = hour;
       tasks.push(
-        runStorageLifecycle(env.DB, env.VOICE_BUCKET).catch((err) => {
+        runStorageLifecycle(db, env.VOICE_BUCKET).catch((err) => {
           console.error('storage lifecycle tick failed:', err);
         })
       );
     }
-    ctx.waitUntil(Promise.allSettled(tasks));
+    ctx.waitUntil(Promise.allSettled(tasks).finally(() => db.flush()));
   },
 };
