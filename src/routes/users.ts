@@ -7,6 +7,9 @@ import {
   updateUserMetadata,
   uploadUserAvatar,
   getUserAvatar,
+  setUsername,
+  getUserByUsername,
+  checkUsernameAvailability,
 } from '../services/users';
 
 const userRoutes = new Hono<AppEnv>();
@@ -77,6 +80,49 @@ userRoutes.post('/me/avatar', async (c) => {
     return c.json(result, 201);
   } catch (err: any) {
     return c.json({ error: err.message }, 400);
+  }
+});
+
+// Set/change globally unique username (protected)
+userRoutes.put('/me/username', async (c) => {
+  try {
+    const user = c.get('user');
+    const body = await c.req.json().catch(() => ({}));
+
+    if (!body.username || typeof body.username !== 'string') {
+      return c.json({ error: 'username is required' }, 400);
+    }
+
+    const profile = await setUsername(c.env.DB, user.id, body.username);
+    return c.json({ user: profile });
+  } catch (err: any) {
+    if (err.message === 'USERNAME_TAKEN') {
+      return c.json({ error: 'Username is already taken' }, 409);
+    }
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+// Public endpoint: check username availability (for registration UX)
+userRoutes.get('/check-username/:username', async (c) => {
+  try {
+    const result = await checkUsernameAvailability(c.env.DB, c.req.param('username'));
+    return c.json(result);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Public endpoint: exact lookup of a user's public profile by unique username
+userRoutes.get('/by-username/:username', async (c) => {
+  try {
+    const profile = await getUserByUsername(c.env.DB, c.req.param('username'));
+    if (!profile) {
+      return c.json({ error: 'User not found' }, 404);
+    }
+    return c.json({ user: profile });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
   }
 });
 

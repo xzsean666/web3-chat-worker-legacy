@@ -100,6 +100,7 @@ export async function verifySignatureAndLogin(
     user = {
       id: walletAddress,
       wallet_address: walletAddress,
+      username: null,
       public_metadata: '{}',
       private_metadata: '{}',
       avatar_key: null,
@@ -154,6 +155,7 @@ export async function validateSession(
       s.expires_at AS session_expires_at,
       s.created_at AS session_created_at,
       u.wallet_address,
+      u.username,
       u.public_metadata,
       u.private_metadata,
       u.avatar_key,
@@ -171,6 +173,7 @@ export async function validateSession(
     session_expires_at: number;
     session_created_at: number;
     wallet_address: string;
+    username: string | null;
     public_metadata: string;
     private_metadata: string;
     avatar_key: string | null;
@@ -193,6 +196,7 @@ export async function validateSession(
     user: {
       id: row.wallet_address,
       wallet_address: row.wallet_address,
+      username: row.username ?? null,
       public_metadata: row.public_metadata ?? '{}',
       private_metadata: row.private_metadata ?? '{}',
       avatar_key: row.avatar_key ?? null,

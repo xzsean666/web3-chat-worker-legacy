@@ -3,6 +3,8 @@ import worker, { app } from '../src/index';
 import { createMockD1Database } from './helpers/db';
 import { createMockR2Bucket, type MockR2Bucket } from './helpers/r2';
 import { createTestWallet, type TestWallet } from './helpers/wallet';
+import { makeMutualFriends } from './helpers/friends';
+import { sweepExpiredMessages } from '../src/services/cleanup';
 import type { Env } from '../src/types';
 
 describe('End-to-End Integration Suite', () => {
@@ -66,6 +68,9 @@ describe('End-to-End Integration Suite', () => {
     // -------------------------------------------------------------------------
     // 2. Direct 1-on-1 Conversation Lifecycle & Explicit Delivery/Read ACK
     // -------------------------------------------------------------------------
+    // Direct chats require mutual friendship
+    await makeMutualFriends(env, alice.token, alice.user.id, bob.token, bob.user.id);
+
     // Alice starts direct chat with Bob
     const directRes = await app.request('/conversations', {
       method: 'POST',
@@ -245,7 +250,8 @@ describe('End-to-End Integration Suite', () => {
     // After 30s viewing window elapses, cleanup sweeper purges from R2 and D1
     await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND user_id = ? AND status = 'read'")
       .bind(oldReadTime, voiceMsgId, bob.user.id).run();
-    await app.request('/admin/cleanup', { method: 'POST' }, env);
+    // 公网 /admin/cleanup 端点已删除，测试直接调用清理服务
+    await sweepExpiredMessages(db, r2);
 
     // Dual-Storage Destruction verification:
     // 1) Audio binary removed from R2
@@ -353,10 +359,8 @@ describe('End-to-End Integration Suite', () => {
     const lazyFetch = (await lazyFetchRes.json()) as any;
     expect(lazyFetch.messages.map((m: any) => m.id)).not.toContain(shortLivedMsg.id);
 
-    // Trigger scheduled cleanup
-    const cleanupRes = await app.request('/admin/cleanup', { method: 'POST' }, env);
-    expect(cleanupRes.status).toBe(200);
-    const cleanupData = (await cleanupRes.json()) as any;
+    // Trigger scheduled cleanup（公网 /admin/cleanup 端点已删除，测试直接调用清理服务）
+    const cleanupData = await sweepExpiredMessages(db, r2);
     expect(cleanupData.purged_messages).toBeGreaterThanOrEqual(1);
 
     // Confirm completely deleted from D1

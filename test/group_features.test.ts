@@ -253,6 +253,69 @@ describe('Group Features: Metadata, Moderation (Mute), Owner Kick, Member Leave 
       expect(updatedGroup.members.length).toBe(2);
       expect(updatedGroup.members.some((m: any) => m.user_id === charlieUser.id)).toBe(false);
     });
+
+    it('prevents a kicked member from sending or reading group messages', async () => {
+      const createRes = await app.request('/groups', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${aliceToken}`,
+        },
+        body: JSON.stringify({
+          name: 'Kick Chat Guard',
+          member_ids: [bobUser.id, charlieUser.id],
+        }),
+      }, env);
+      const group = (await createRes.json()) as any;
+
+      // Charlie can chat while still a member
+      const beforeKickRes = await app.request(`/conversations/${group.id}/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${charlieToken}`,
+        },
+        body: JSON.stringify({ content: 'Hello everyone' }),
+      }, env);
+      expect(beforeKickRes.status).toBe(201);
+
+      // Alice (owner) kicks Charlie
+      const kickRes = await app.request(`/groups/${group.id}/kick`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${aliceToken}`,
+        },
+        body: JSON.stringify({ user_id: charlieUser.id }),
+      }, env);
+      expect(kickRes.status).toBe(200);
+
+      // Charlie can no longer send messages to the group
+      const sendRes = await app.request(`/conversations/${group.id}/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${charlieToken}`,
+        },
+        body: JSON.stringify({ content: 'Am I still here?' }),
+      }, env);
+      expect(sendRes.status).toBe(403);
+      const sendErr = (await sendRes.json()) as { error: string };
+      expect(sendErr.error).toContain('not a member');
+
+      // Charlie can no longer read group messages
+      const readRes = await app.request(`/conversations/${group.id}/messages`, {
+        headers: { Authorization: `Bearer ${charlieToken}` },
+      }, env);
+      expect(readRes.status).toBe(403);
+
+      // Charlie no longer receives the group via /sync
+      const syncRes = await app.request('/sync?since=0', {
+        headers: { Authorization: `Bearer ${charlieToken}` },
+      }, env);
+      const syncData = (await syncRes.json()) as any;
+      expect(syncData.messages.some((m: any) => m.conversation_id === group.id)).toBe(false);
+    });
   });
 
   describe('Admin Role Management & Speech Privilege (Requirement ⑥)', () => {

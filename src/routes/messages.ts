@@ -3,7 +3,6 @@ import type { AppEnv } from '../types';
 import { authMiddleware } from '../middleware/auth';
 import {
   sendMessage,
-  sendMessagesBatch,
   getConversationMessages,
   acknowledgeDelivery,
   acknowledgeRead,
@@ -20,29 +19,8 @@ interface BatchAckBody {
   message_ids?: string[];
 }
 
-interface BatchSendBody {
-  messages?: SendMessageOptions[];
-}
-
-// Conversation message sending (batch)
-messageRoutes.post('/conversations/:id/messages/batch', async (c) => {
-  try {
-    const user = c.get('user');
-    const conversationId = c.req.param('id');
-    const body = (await c.req.json<BatchSendBody>().catch(() => ({}))) as BatchSendBody;
-    const messages = body.messages ?? [];
-
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return c.json({ error: 'messages array is required and cannot be empty' }, 400);
-    }
-
-    const created = await sendMessagesBatch(c.env.DB, conversationId, user.id, messages);
-    return c.json({ messages: created }, 201);
-  } catch (err: any) {
-    const status = err.message.includes('Unauthorized') || err.message.includes('blocked') || err.message.includes('muted') ? 403 : 400;
-    return c.json({ error: err.message }, status);
-  }
-});
+// 单请求 ACK id 上限：正常客户端每批 ≤50，200 上限拦截恶意/异常超大批次打爆 D1
+const MAX_ACK_BATCH_SIZE = 200;
 
 // Conversation message sending and fetching
 messageRoutes.post('/conversations/:id/messages', async (c) => {
@@ -88,6 +66,9 @@ messageRoutes.post('/messages/ack', async (c) => {
     if (!Array.isArray(ids) || ids.length === 0) {
       return c.json({ error: 'message_ids array is required' }, 400);
     }
+    if (ids.length > MAX_ACK_BATCH_SIZE) {
+      return c.json({ error: `message_ids exceeds maximum batch size of ${MAX_ACK_BATCH_SIZE}` }, 400);
+    }
 
     const result = await acknowledgeDelivery(c.env.DB, user.id, ids);
     return c.json(result);
@@ -122,6 +103,9 @@ messageRoutes.post('/messages/read', async (c) => {
 
     if (!Array.isArray(ids) || ids.length === 0) {
       return c.json({ error: 'message_ids array is required' }, 400);
+    }
+    if (ids.length > MAX_ACK_BATCH_SIZE) {
+      return c.json({ error: `message_ids exceeds maximum batch size of ${MAX_ACK_BATCH_SIZE}` }, 400);
     }
 
     const result = await acknowledgeRead(c.env.DB, c.env.VOICE_BUCKET, user.id, ids);

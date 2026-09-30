@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { app } from '../src/index';
 import { createMockD1Database } from './helpers/db';
 import { createTestWallet, type TestWallet } from './helpers/wallet';
+import { makeMutualFriends } from './helpers/friends';
+import { sweepExpiredMessages } from '../src/services/cleanup';
 import type { Env } from '../src/types';
 
 describe('Explicit Delivery ACK & Burn-on-Read Lifecycle', () => {
@@ -52,6 +54,7 @@ describe('Explicit Delivery ACK & Burn-on-Read Lifecycle', () => {
     bobUser = bobAuth.user;
 
     // Create direct conversation
+    await makeMutualFriends(env, aliceToken, aliceUser.id, bobToken, bobUser.id);
     const convRes = await app.request('/conversations', {
       method: 'POST',
       headers: {
@@ -160,7 +163,8 @@ describe('Explicit Delivery ACK & Burn-on-Read Lifecycle', () => {
     const oldTimestamp = Date.now() - 35000;
     await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND status = 'read'")
       .bind(oldTimestamp, msg.id).run();
-    await app.request('/admin/cleanup', { method: 'POST' }, env);
+    // 公网 /admin/cleanup 端点已删除，测试直接调用清理服务
+    await sweepExpiredMessages(db, env.VOICE_BUCKET);
 
     const inDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msg.id).first();
     expect(inDb).toBeNull();
@@ -371,7 +375,8 @@ describe('Explicit Delivery ACK & Burn-on-Read Lifecycle', () => {
     const oldReadTime2 = Date.now() - 35000;
     await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND status = 'read'")
       .bind(oldReadTime2, msg.id).run();
-    await app.request('/admin/cleanup', { method: 'POST' }, env);
+    // 公网 /admin/cleanup 端点已删除，测试直接调用清理服务
+    await sweepExpiredMessages(db, env.VOICE_BUCKET);
 
     // Message must now be purged from D1
     inDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msg.id).first();

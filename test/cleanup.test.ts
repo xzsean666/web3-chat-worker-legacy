@@ -92,15 +92,13 @@ describe('Scheduled Expiration Cleanup & Cron Worker', () => {
     expect(activeVoice).not.toBeNull();
   });
 
-  it('triggers cleanup via POST /admin/cleanup endpoint', async () => {
+  it('public POST /admin/cleanup endpoint has been removed (storage cleanup is internal-admin only)', async () => {
     const res = await app.request('/admin/cleanup', {
       method: 'POST',
     }, env);
 
-    expect(res.status).toBe(200);
-    const data = (await res.json()) as any;
-    expect(data.purged_messages).toBe(2);
-    expect(data.deleted_voice_objects).toBe(1);
+    // 路由已删：请求落到带全局 auth 的 '/' 路由 → 401，绝不再是公网可调的 200
+    expect(res.status).toBe(401);
   });
 
   it('executes scheduled hook with execution context', async () => {

@@ -3,6 +3,8 @@ import { app } from '../src/index';
 import { createMockD1Database } from './helpers/db';
 import { MockR2Bucket } from './helpers/r2';
 import { createTestWallet } from './helpers/wallet';
+import { makeMutualFriends } from './helpers/friends';
+import { sweepExpiredMessages } from '../src/services/cleanup';
 import type { Env } from '../src/types';
 
 describe('Message Recall & 30-Second Burn-on-Read Viewing Window (TASK-015)', () => {
@@ -48,6 +50,9 @@ describe('Message Recall & 30-Second Burn-on-Read Viewing Window (TASK-015)', ()
     const bobWallet = createTestWallet();
     const alice = await loginUser(aliceWallet);
     const bob = await loginUser(bobWallet);
+
+    // Direct chats require mutual friendship
+    await makeMutualFriends(env, alice.token, alice.user.id, bob.token, bob.user.id);
 
     // Create 1:1 conversation
     const convRes = await app.request('/conversations', {
@@ -98,6 +103,9 @@ describe('Message Recall & 30-Second Burn-on-Read Viewing Window (TASK-015)', ()
     const bobWallet = createTestWallet();
     const alice = await loginUser(aliceWallet);
     const bob = await loginUser(bobWallet);
+
+    // Direct chats require mutual friendship
+    await makeMutualFriends(env, alice.token, alice.user.id, bob.token, bob.user.id);
 
     const convRes = await app.request('/conversations', {
       method: 'POST',
@@ -150,6 +158,9 @@ describe('Message Recall & 30-Second Burn-on-Read Viewing Window (TASK-015)', ()
     const alice = await loginUser(aliceWallet);
     const bob = await loginUser(bobWallet);
 
+    // Direct chats require mutual friendship
+    await makeMutualFriends(env, alice.token, alice.user.id, bob.token, bob.user.id);
+
     const convRes = await app.request('/conversations', {
       method: 'POST',
       headers: {
@@ -201,6 +212,9 @@ describe('Message Recall & 30-Second Burn-on-Read Viewing Window (TASK-015)', ()
     const bobWallet = createTestWallet();
     const alice = await loginUser(aliceWallet);
     const bob = await loginUser(bobWallet);
+
+    // Direct chats require mutual friendship
+    await makeMutualFriends(env, alice.token, alice.user.id, bob.token, bob.user.id);
 
     const convRes = await app.request('/conversations', {
       method: 'POST',
@@ -261,12 +275,8 @@ describe('Message Recall & 30-Second Burn-on-Read Viewing Window (TASK-015)', ()
     const bobData2 = (await bobFetchAfter30s.json()) as { messages: any[] };
     expect(bobData2.messages.some((m) => m.id === sendData.id)).toBe(false);
 
-    // Cron cleanup purges the message from D1
-    const cleanupRes = await app.request('/admin/cleanup', {
-      method: 'POST',
-    }, env);
-    expect(cleanupRes.status).toBe(200);
-    const cleanupData = (await cleanupRes.json()) as { purged_messages: number };
+    // Cron cleanup purges the message from D1（公网 /admin/cleanup 端点已删除，测试直接调用清理服务）
+    const cleanupData = await sweepExpiredMessages(db, r2);
     expect(cleanupData.purged_messages).toBeGreaterThanOrEqual(1);
 
     const checkMsg = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(sendData.id).first();

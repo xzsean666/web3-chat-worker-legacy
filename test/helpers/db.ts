@@ -7,9 +7,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export class MockD1PreparedStatement {
-  public db: DatabaseSync;
-  public sql: string;
-  public params: unknown[] = [];
+  private db: DatabaseSync;
+  private sql: string;
+  private params: unknown[] = [];
 
   constructor(db: DatabaseSync, sql: string, params: unknown[] = []) {
     this.db = db;
@@ -100,9 +100,7 @@ export class MockD1Database {
   async batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> {
     const results: D1Result<T>[] = [];
     for (const stmt of statements) {
-      const sql = (stmt as any).sql || '';
-      const isSelect = sql.trim().toUpperCase().startsWith('SELECT');
-      const res = isSelect ? await stmt.all<T>() : await (stmt as any).run();
+      const res = await stmt.all<T>();
       results.push(res);
     }
     return results;

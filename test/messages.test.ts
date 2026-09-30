@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { app } from '../src/index';
 import { createMockD1Database } from './helpers/db';
 import { createTestWallet, type TestWallet } from './helpers/wallet';
+import { makeMutualFriends } from './helpers/friends';
 import type { Env } from '../src/types';
 
 describe('Messaging Pipeline & Incremental Sync Engine', () => {
@@ -58,6 +59,9 @@ describe('Messaging Pipeline & Incremental Sync Engine', () => {
     const eveAuth = await loginUser(eveWallet);
     eveToken = eveAuth.token;
     eveUser = eveAuth.user;
+
+    // Direct chats require mutual friendship
+    await makeMutualFriends(env, aliceToken, aliceUser.id, bobToken, bobUser.id);
 
     // Create a direct conversation between Alice and Bob
     const convRes = await app.request('/conversations', {
@@ -248,37 +252,5 @@ describe('Messaging Pipeline & Incremental Sync Engine', () => {
     expect(syncData.messages.length).toBe(2);
     expect(syncData.messages.map((m: any) => m.content)).toContain('Direct chat ping');
     expect(syncData.messages.map((m: any) => m.content)).toContain('Group chat ping');
-  });
-
-  it('supports sending multiple messages atomically via /conversations/:id/messages/batch', async () => {
-    const batchRes = await app.request(`/conversations/${conversationId}/messages/batch`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aliceToken}` },
-      body: JSON.stringify({
-        messages: [
-          { content: 'Batch message 1' },
-          { content: 'Batch message 2' },
-          { content: 'Batch message 3' },
-        ],
-      }),
-    }, env);
-
-    expect(batchRes.status).toBe(201);
-    const data = (await batchRes.json()) as { messages: any[] };
-    expect(data.messages).toHaveLength(3);
-    expect(data.messages[0].content).toBe('Batch message 1');
-    expect(data.messages[1].content).toBe('Batch message 2');
-    expect(data.messages[2].content).toBe('Batch message 3');
-
-    // Messages should be monotonically ordered
-    expect(data.messages[0].created_at).toBeLessThanOrEqual(data.messages[1].created_at);
-    expect(data.messages[1].created_at).toBeLessThanOrEqual(data.messages[2].created_at);
-
-    // Verify in DB
-    const listRes = await app.request(`/conversations/${conversationId}/messages`, {
-      headers: { Authorization: `Bearer ${bobToken}` },
-    }, env);
-    const listData = (await listRes.json()) as any;
-    expect(listData.messages).toHaveLength(3);
   });
 });

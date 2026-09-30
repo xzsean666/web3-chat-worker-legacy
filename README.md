@@ -292,6 +292,21 @@ Update group name, description, and top marquee scrolling configuration (`owner`
   }
   ```
 - **Response**: `200 OK` returns updated conversation with synchronized `metadata`.
+- **Metadata semantics**: supplied `metadata` is a top-level merge into the stored object; it is not a full replacement. Clients that submit a fully merged object remain compatible.
+- **Server enforcement**: when `metadata.rename_admin_only` is `true`, non-owners/admins receive `403` for rename attempts. Group settings remain administrator-only even when the flag is false.
+
+#### Join approval and invite links
+
+`metadata.join_admin_only` is enforced by the Worker. Direct member additions by a non-owner/admin are rejected with `403`; use the approval flow instead.
+
+- `POST /groups/:id/invite-links` (`owner`/`admin`): create a deep-link token. Body: `{ "expires_in_seconds": 3600, "max_uses": 10 }` (both optional). Returns `{ token, url: "https://api.chatnice.top/g/<token|slug>", expires_at, max_uses }`. Encode `url` as the QR payload; the public landing page at `/g/:token` tries to open the app via `chaintalk://group-invite/<token>` and falls back to the download page. Legacy `chaintalk://` links remain supported by clients.
+- `POST /groups/join-by-token`: body `{ "token": "...", "message": "optional application note", "retry": false }`. It returns `{ status: "joined", member, conversation }` for direct entry (and also when an already-approved member refreshes the link). For approval groups it returns `202` with `{ status: "pending", pending: true, request, join_request, group }`; `group` is a preview with ID, name, absolute avatar URL when set, avatar timestamp, current member count, and metadata. A rejected applicant receives `200` with `{ status: "rejected", pending: false, request, join_request, group }`. Send `retry: true` after that rejected response to explicitly create a new pending request without silently creating one during a status refresh.
+- Invalid/missing invite links return `404`, expired links `410`, and exhausted limited-use links `429`; their error bodies remain `{ "error": "..." }`.
+- `POST /groups/:id/join-requests`: submit the authenticated user's application with `{ "message": "optional" }`.
+- `GET /groups/:id/join-requests?status=pending`: list requests (`owner`/`admin` only). Rows include the applicant's stored wallet, nickname, avatar URL, message, status, and handler fields.
+- `POST /groups/:id/join-requests/:requestId/approve` and `/reject`: owner/admin decision endpoints. Approval creates the membership.
+
+Each application, decision, and successful join emits a `messages.type = "system"` event (JSON payload in `content`) through the normal conversation and `/sync` channels.
 
 #### `POST /groups/:id/members`
 Add member to group (`owner` or `admin`).
@@ -309,7 +324,10 @@ Remove member from group or self-leave.
 
 #### `POST /groups/:id/leave`
 Voluntarily leave the group for members and admins.
-- If the `owner` leaves, ownership cannot be transferred; the sovereign group is automatically deleted.
+- The current owner leaving still deletes the group. To preserve the group, transfer ownership first and then leave.
+
+#### `POST /groups/:id/transfer`
+Transfer ownership (`owner` only). Body: `{ "new_owner_user_id": "..." }` or `{ "wallet_address": "0x..." }`. The target must already be a group member. The D1 batch updates `owner_address`, promotes the target to the single `owner`, and demotes the prior owner to `admin` atomically.
 
 #### `PUT /groups/:id/members/:userId/role`
 Promote or demote group members (`owner` only).
@@ -580,6 +598,51 @@ Manually invoke expiration sweeper.
     "timestamp": 1725514800000
   }
   ```
+
+---
+
+### 10. User Reports (`/reports`)
+
+All report endpoints require authentication. Reports and their evidence are private: they are never sent to a conversation and cannot be read by the reported account.
+
+#### `POST /reports/evidence`
+
+Upload one image as private evidence using `multipart/form-data`. Use form key `file` (also accepts `image` or `evidence`). Supported types: JPEG, PNG, WebP, GIF, HEIC, AVIF; maximum size 20 MB.
+
+- **Response**: `201 Created`
+  ```json
+  {
+    "object_key": "report-evidence/0xreporter.../uuid.png",
+    "mime_type": "image/png",
+    "size": 12345,
+    "created_at": 1725514800000
+  }
+  ```
+
+#### `POST /reports`
+
+Submit a report. `reported_wallet_address` must be a valid EVM address; if `reported_user_id` is also supplied it must identify that same wallet.
+
+```json
+{
+  "reported_user_id": "0xtarget...",
+  "reported_wallet_address": "0xtarget...",
+  "category": "fraud",
+  "message_ids": ["message-uuid"],
+  "description": "Asked for an off-platform payment.",
+  "evidence_keys": ["report-evidence/0xreporter.../uuid.png"]
+}
+```
+
+Allowed categories: `harassment`, `fraud`, `account_theft`, `infringement`, `counterfeit`, `impersonation`, `minor_protection`, `irrational_fandom`.
+
+`message_ids` must be visible to the reporting account. `evidence_keys` must have been uploaded by that same account and can only be attached once.
+
+- **Response**: `201 Created`, `{ "report": { "id", "status": "received", "created_at", ... } }`
+
+#### `GET /reports`
+
+List the authenticated user's submitted reports. Optional `?limit=1..100`; response shape is `{ "reports": [...] }`.
 
 ---
 

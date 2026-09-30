@@ -249,4 +249,70 @@ describe('User Dual-Metadata & Avatar Storage (TASK-014)', () => {
     }, env);
     expect(res2.status).toBe(400);
   });
+
+  it('supports globally unique usernames: set, conflict, lookup, availability, search', async () => {
+    const aliceWallet = createTestWallet();
+    const bobWallet = createTestWallet();
+    const alice = await loginUser(aliceWallet);
+    const bob = await loginUser(bobWallet);
+
+    // Alice sets a username (mixed case + @ prefix get normalized)
+    const setRes = await app.request('/users/me/username', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${alice.token}`,
+      },
+      body: JSON.stringify({ username: '@Alice_Wang' }),
+    }, env);
+    expect(setRes.status).toBe(200);
+    const setData = (await setRes.json()) as { user: any };
+    expect(setData.user.username).toBe('alice_wang');
+
+    // Invalid format is rejected
+    const badRes = await app.request('/users/me/username', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${alice.token}`,
+      },
+      body: JSON.stringify({ username: 'a!' }),
+    }, env);
+    expect(badRes.status).toBe(400);
+
+    // Bob cannot take the same username
+    const conflictRes = await app.request('/users/me/username', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${bob.token}`,
+      },
+      body: JSON.stringify({ username: 'alice_wang' }),
+    }, env);
+    expect(conflictRes.status).toBe(409);
+
+    // Availability check reflects both states
+    const takenCheck = await app.request('/users/check-username/alice_wang', {}, env);
+    expect(((await takenCheck.json()) as any).available).toBe(false);
+    const freeCheck = await app.request('/users/check-username/bob_2026', {}, env);
+    expect(((await freeCheck.json()) as any).available).toBe(true);
+
+    // Exact lookup by username returns Alice's public profile (no auth needed)
+    const lookupRes = await app.request('/users/by-username/alice_wang', {}, env);
+    expect(lookupRes.status).toBe(200);
+    const lookupData = (await lookupRes.json()) as { user: any };
+    expect(lookupData.user.wallet_address).toBe(alice.wallet.address.toLowerCase());
+    expect(lookupData.user.username).toBe('alice_wang');
+    expect(lookupData.user.private_metadata).toBeUndefined();
+
+    // Username also works as a friend-search keyword
+    const searchRes = await app.request('/friends/recommendations?q=alice_wang', {
+      headers: { Authorization: `Bearer ${bob.token}` },
+    }, env);
+    expect(searchRes.status).toBe(200);
+    const searchData = (await searchRes.json()) as { recommendations: any[] };
+    const found = searchData.recommendations.find((r) => r.username === 'alice_wang');
+    expect(found).toBeDefined();
+    expect(found.address).toBe(alice.wallet.address.toLowerCase());
+  });
 });

@@ -3,6 +3,8 @@ import { app } from '../src/index';
 import { createMockD1Database } from './helpers/db';
 import { createMockR2Bucket, type MockR2Bucket } from './helpers/r2';
 import { createTestWallet, type TestWallet } from './helpers/wallet';
+import { makeMutualFriends } from './helpers/friends';
+import { sweepExpiredMessages } from '../src/services/cleanup';
 import type { Env } from '../src/types';
 
 describe('File Message Storage (R2) & Synchronized Cleanup', () => {
@@ -64,6 +66,7 @@ describe('File Message Storage (R2) & Synchronized Cleanup', () => {
     charlieUser = charlieAuth.user;
 
     // Direct conversation between Alice and Bob
+    await makeMutualFriends(env, aliceToken, aliceUser.id, bobToken, bobUser.id);
     const convRes = await app.request('/conversations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aliceToken}` },
@@ -228,7 +231,8 @@ describe('File Message Storage (R2) & Synchronized Cleanup', () => {
     const oldTimestamp = Date.now() - 35000;
     await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND status = 'read'")
       .bind(oldTimestamp, msgId).run();
-    await app.request('/admin/cleanup', { method: 'POST' }, env);
+    // 公网 /admin/cleanup 端点已删除，测试直接调用清理服务
+    await sweepExpiredMessages(db, r2);
 
     // Verify D1 records deleted
     const msgInDb = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(msgId).first();
@@ -314,7 +318,8 @@ describe('File Message Storage (R2) & Synchronized Cleanup', () => {
     // After Charlie's 30s viewing window elapses, sweeper purges from R2 and D1
     await db.prepare("UPDATE message_receipts SET timestamp = ? WHERE message_id = ? AND user_id = ? AND status = 'read'")
       .bind(oldReadTime, msgId, charlieUser.id).run();
-    await app.request('/admin/cleanup', { method: 'POST' }, env);
+    // 公网 /admin/cleanup 端点已删除，测试直接调用清理服务
+    await sweepExpiredMessages(db, r2);
 
     // All read and viewing windows elapsed -> purged from R2 and D1
     expect(r2.hasKey(objectKey)).toBe(false);

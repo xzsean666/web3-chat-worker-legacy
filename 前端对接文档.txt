@@ -1,0 +1,830 @@
+================================================================================
+Web3 Chat Worker — 前端对接文档
+================================================================================
+文档版本：v2.5（2026-09-09 更新：新增好友申请 /friend-requests 全套接口；单聊需互加好友；
+            删除好友后双向禁聊；新增群成员专属昵称 group_nickname 及 PATCH /groups/:id/members/me）
+适用部署：新 Cloudflare 账号（zsen9387@gmail.com）上的全新部署
+后端形态：Cloudflare Worker（Hono 框架）
+数据存储：Cloudflare D1（SQLite）+ Cloudflare R2（语音/图片/文件/头像二进制）
+认证方式：EVM 钱包签名登录（EIP-191 personal_sign），Bearer Token 鉴权
+--------------------------------------------------------------------------------
+
+★★★ 重要：账号迁移说明（旧账号 Worker → 新账号 Worker）★★★
+  本后端已在【新的 Cloudflare 账号】下重新部署，与旧账号上的 Worker 完全独立：
+  1. 【前端必须更换 BASE 地址】为下方新地址，旧地址（另一个账号下的
+     web3-chat-worker）已与本项目无关，请全局替换。
+  2. 【数据不互通】新部署是全新空数据库：旧 Worker 上的用户、会话、群、
+     聊天记录、好友、黑名单、媒体文件【全部不存在】于新环境，无法迁移。
+  3. 【所有用户必须重新登录】旧 token 在新后端一律 401 无效。前端检测到 401
+     应清空本地 token，引导用户重新走"钱包签名登录"流程（见第二章）。
+  4. 用户 ID 依然是钱包地址本身，同一钱包在新环境登录后会自动创建同名用户，
+     但历史数据不会回来。
+  5. 旧账号的 Worker 建议停用或删除，避免前端/用户误连旧环境产生脏数据。
+
+【本部署的 Base URL】
+  https://api.chatnice.top          ← 主地址：自定义域名，中国大陆可直连，无需代理
+  https://web3-chat-worker.zsen9387.workers.dev   ← 备用地址：国内需代理访问
+  （本文档下文以 BASE 代指；前端请优先使用 api.chatnice.top，
+    建议做成可配置项，两个地址的接口完全一致）
+
+健康检查（无需认证）：
+  GET BASE/health
+  响应：{"status":"ok","timestamp":1725514800000,"service":"web3-chat-worker"}
+
+================================================================================
+一、通用约定
+================================================================================
+
+1. 认证 Header
+   除特别标注"无需认证"的接口外，所有接口都必须带：
+     Authorization: Bearer <token>
+   token 由 /auth/verify 返回，有效期 30 天，过期或无效返回 401。
+
+2. 响应与错误格式
+   - 成功：JSON 对象（见各接口说明）。
+   - 失败：{"error": "<英文错误信息>"}，HTTP 状态码含义：
+       400 参数错误 / 401 未认证或签名无效 / 403 无权限·被拉黑·被禁言 / 404 不存在
+   - 注意：error 是自然语言句子，不是错误码。前端请按 HTTP 状态码处理逻辑，
+     不要用 error 字符串做判断或国际化匹配。
+
+3. 地址规范
+   所有钱包地址统一为小写（后端会自动 trim + lowercase）。用户 ID 就是钱包地址。
+
+4. 时间戳
+   全部为 Unix 毫秒时间戳（number）。muted_until 有一个特例：-1 表示"无限期禁言"
+   （见群功能-禁言部分）。
+
+================================================================================
+二、认证流程（钱包签名登录）
+================================================================================
+
+第 1 步：获取签名 nonce（无需认证）
+  POST BASE/auth/nonce
+  Content-Type: application/json
+  请求体：
+    { "wallet_address": "0xabc..." }
+  响应 200：
+    {
+      "nonce": "4b68e999...",
+      "message": "Sign this message to authenticate with Web3 Chat:\nNonce: 4b68e999...",
+      "expires_at": 1725514800000
+    }
+  说明：nonce 5 分钟内有效、单次使用。
+
+第 2 步：钱包签名
+  用用户钱包对响应中的 message 字段做 personal_sign（EIP-191）。
+  ethers.js 示例：const signature = await signer.signMessage(message);
+  viem 示例：const signature = await walletClient.signMessage({ account, message });
+
+第 3 步：验证签名换取 token（无需认证）
+  POST BASE/auth/verify
+  请求体：
+    {
+      "wallet_address": "0xabc...",
+      "signature": "0x签名结果",
+      "nonce": "可选；不传则使用该地址最新一条 nonce"
+    }
+  响应 200：
+    {
+      "token": "<明文 token，只在这里返回一次，请妥善保存>",
+      "user": {
+        "id": "0xabc...",
+        "wallet_address": "0xabc...",
+        "public_metadata": "{}",   // 注意：这里是 JSON 字符串
+        "private_metadata": "{}",
+        "avatar_key": null,
+        "avatar_mime": null,
+        "avatar_updated_at": null,
+        "created_at": 1725514800000,
+        "updated_at": 1725514800000
+      },
+      "session": { "id": "...", "user_id": "0xabc...", "expires_at": ..., "created_at": ... }
+    }
+  失败：401 {"error":"Invalid signature"} 或 {"error":"Nonce not found or expired"}
+  【坑】此接口 user 里的 metadata 是字符串；而 /auth/me、/users/me 返回的是解析后
+        的对象，前端需兼容两种形态。
+
+第 4 步（之后所有请求）：Header 携带
+  Authorization: Bearer <token>
+
+查询当前登录用户（需认证）：
+  GET BASE/auth/me
+  响应：
+    { "user": {
+        "id": "0xabc...", "wallet_address": "0xabc...",
+        "public_metadata": {},        // 这里是对象
+        "private_metadata": {},       // 仅本人可见
+        "avatar_url": "/users/0xabc.../avatar" 或 null,
+        "avatar_updated_at": ..., "created_at": ..., "updated_at": ...
+    } }
+
+退出登录（需认证）：
+  POST BASE/auth/logout     → {"success": true}（撤销当前 token）
+
+================================================================================
+三、会话（单聊 + 群聊列表）
+================================================================================
+
+发起单聊（需认证）：
+  POST BASE/conversations
+  请求体：{ "target_user_id": "0x..." }  或  { "target_wallet_address": "0x..." }
+  响应 201：会话对象。单聊 ID 是确定性的："direct:<小地址>:<大地址>"。
+  被对方拉黑 → 403 {"error":"Cannot start conversation: you have been blocked by this user"}
+  不能和自己聊天 → 400。
+  ★ 注意：创建会话不要求好友关系，但【发消息】要求双方互为好友（见"发送消息"一节）。
+
+会话列表（需认证，含单聊和群，按最近活跃倒序）：
+  GET BASE/conversations
+  响应：
+    { "conversations": [
+        { "id": "...", "type": "direct" | "group",
+          "owner_address": "0x...", "name": "群名或null",
+          "metadata": {},                 // 对象，群的扩展信息都在这里
+          "is_muted": false, "mute_until": null,
+          "role": "owner" | "admin" | "member" | null,
+          "member_count": 5,
+          "created_at": ..., "updated_at": ... }
+    ] }
+
+会话详情（需认证，必须是成员）：
+  GET BASE/conversations/:id
+  响应（ConversationDetail，群功能核心数据结构）：
+    {
+      "id": "0xownerAddr:slug",
+      "type": "group",
+      "owner_address": "0x...",
+      "name": "群名称",
+      "metadata": {
+        "name": "群名称",                  // 与顶层 name 冗余同步
+        "description": "群介绍",
+        "announcement": "群公告",
+        "marquee": { "enabled": true, "text": "顶部滚动内容", "speed": 50 },
+        "avatar_url": "/groups/<群ID>/avatar",   // 仅群主已上传群头像时出现
+        "moderation": { "is_muted": false, "mute_until": null }
+      },
+      "is_muted": false,                  // 全群禁言开关
+      "mute_until": null,                 // 全群禁言截止时间，null = 无限期/未禁言
+      "members": [
+        { "id": "...", "conversation_id": "...", "user_id": "0x...",
+          "wallet_address": "0x...",
+          "role": "owner" | "admin" | "member",
+          "muted_until": null | -1 | 时间戳,   // -1 = 无限期单人禁言
+          "mute_reason": null | "原因",
+          "is_muted": false,
+          "joined_at": ..., "last_read_message_id": null }
+      ],
+      "my_role": "owner",                 // 当前登录用户在本群的角色
+      "my_is_muted": false,               // 当前登录用户是否被单人禁言
+      "created_at": ..., "updated_at": ...
+    }
+  非成员 → 403；不存在 → 404。
+
+================================================================================
+四、消息发送 / 接收 / ACK / 增量同步
+================================================================================
+
+发送消息（需认证）：
+  POST BASE/conversations/:id/messages
+  请求体：
+    {
+      "content": "文本内容",               // text 类型必填且非空
+      "type": "text",                     // text | voice | image | file
+      "retention": "permanent",           // permanent | on_read（阅后即焚）
+      "expires_in_seconds": 86400,        // 可选；不传默认 24 小时后过期删除
+      "burn_after_seconds": 30,           // 可选；on_read 时生效，最低 30 秒
+      "mentions": ["0x..."]               // 可选，@提醒
+    }
+  响应 201（MessageRow）：
+    { "id": "...", "conversation_id": "...", "sender_id": "0x...",
+      "type": "text", "content": "...",
+      "retention": "permanent", "status": "pending",
+      "expires_at": ..., "delivered_at": null, "read_at": null,
+      "created_at": ..., "recalled_at": null,
+      "burn_after_seconds": null, "mentions": "[...]" }
+  【坑】mentions 是 JSON 字符串不是数组，前端需 JSON.parse。
+  【坑】所有消息默认 24 小时过期（服务端每分钟 cron 物理清除 D1+R2），
+        需要更长保留期请显式传 expires_in_seconds。
+  被禁言时发送 → 403（见群功能-禁言）。
+  ★ 单聊必须双方互为好友才能发消息（任一方向删除好友后，双向都不能再发）→ 403：
+    {"error":"Unauthorized: you are no longer friends with this user"}
+    前端建议：收到该错误时提示"你们已不再是好友"，并引导重新添加好友。
+    重新互相添加好友后即可恢复聊天（历史会话和消息不删除）。
+  被踢出群的成员发消息/拉消息 → 403：
+    {"error":"Unauthorized: you are not a member of this conversation"}
+
+拉取会话消息（游标分页，升序，需认证）：
+  GET BASE/conversations/:id/messages?after_id=<消息id>&limit=50
+  响应：
+    { "messages": [ ...每条带 sender_address，voice/image/file 类型附对应元数据对象 ],
+      "next_cursor": "<最后一条消息id>", "has_more": false }
+  说明：limit 1~100，默认 50；翻页把 next_cursor 传给 after_id。
+        被撤回的消息返回 is_recalled: true、content: "[Message recalled]"。
+
+全局增量同步（核心！建议客户端轮询，需认证）：
+  GET BASE/sync?since=<毫秒时间戳>&limit=100
+  响应：
+    { "messages": [...], "sync_timestamp": 1725514800000, "has_more": false }
+  说明：拉取"我加入的所有会话"中 created_at > since 的消息。limit 1~200。
+  用法：首次 since=0 或本地最后同步时间；之后每次把响应里的 sync_timestamp
+        存下来，下次作为 since 传回。建议每 2~5 秒轮询一次。
+
+送达 ACK（显式 ACK 模型：HTTP 200 只是 API 收据，送达必须客户端主动 ACK）：
+  批量：POST BASE/messages/ack     请求体：{"message_ids": ["..."]}
+       响应：{"acknowledged": [...], "skipped": [...]}
+  单条：POST BASE/messages/:id/ack → {"success": true, "message_id": "...", "status": "delivered"}
+  说明：发送者自己的消息会被 skip；群聊中所有接收者都 ACK 后，消息 status 才变 delivered。
+
+已读 ACK：
+  批量：POST BASE/messages/read    请求体：{"message_ids": ["..."]}
+       响应：{"read": [...], "burned": [...], "skipped": [...], "burn_windows": {"<id>": 30}}
+  单条：POST BASE/messages/:id/read
+       → {"success": true, "message_id": "...", "status": "read"|"burned", "burn_after_seconds": 30}
+  说明：retention=on_read 的消息在所有人已读且各自烧毁窗口（默认30秒）过后，从 D1+R2 物理销毁。
+
+撤回消息（仅发送者本人，默认 30 秒窗口内）：
+  POST BASE/messages/:id/recall
+  → {"success": true, "message_id": "...", "recalled_at": ...}
+  说明：附带媒体会立即从 R2 删除。
+
+回执查询（消息已送达/已读状态）：
+  GET BASE/messages/:id/receipts
+  → { "message_id": "...", "total_recipients": 3,
+      "delivered_count": 2, "read_count": 1,
+      "all_delivered": false, "all_read": false,
+      "receipts": [ {"user_id": "0x...", "wallet_address": "0x...",
+                     "status": "pending"|"delivered"|"read",
+                     "delivered_at": ..., "read_at": ...} ] }
+
+================================================================================
+五、群功能（本文档重点，对应 6 项需求）
+================================================================================
+
+角色体系：owner（群主）> admin（管理员）> member（普通成员）。
+  - 建群者自动为 owner。
+  - owner/admin 不受任何禁言限制，始终可以发消息。
+  - 权限矩阵：
+      修改群资料/群禁言/踢人：owner + admin
+      设置/取消管理员：仅 owner
+      上传/更换群头像：仅 owner
+      单人禁言：owner + admin（但不能禁言 owner/admin）
+      退群：所有人（当前 owner 退群 = 解散整个群；请先转让群主）
+
+--------------------------------------------------------------------------------
+建群
+--------------------------------------------------------------------------------
+  POST BASE/groups（需认证）
+  请求体：
+    {
+      "name": "群名称（必填）",
+      "description": "群介绍（可选）",
+      "announcement": "群公告（可选）",
+      "marquee": { "enabled": true, "text": "滚动内容", "speed": 50 },  // 可选
+      "metadata": { "任意自定义字段": "..." },        // 可选，扩展用
+      "member_ids": ["0x...", "0x..."],               // 可选，初始成员（member 角色）
+      "slug": "mygroup"                               // 可选，群 ID 后缀
+    }
+  响应 201：完整 ConversationDetail（结构见"三、会话详情"）。
+  群 ID 格式：<owner地址>:<slug>，如 "0xabc...:mygroup"。
+
+--------------------------------------------------------------------------------
+需求① 修改群名称（存于群 metadata）
+--------------------------------------------------------------------------------
+  接口：PATCH BASE/groups/:id        （或等价的 PATCH BASE/groups/:id/metadata）
+  权限：仅 owner / admin，否则 403。
+  请求体（任意字段子集）：
+    { "name": "新群名称" }
+  说明：
+    - 群名会同时写入 conversations.name 列和 metadata.name 字段，两处冗余同步。
+    - 前端展示时优先读会话详情的 name（或 metadata.name，两者一致）。
+    - 群名不能为空，否则 400 {"error":"Group name cannot be empty"}。
+  响应：更新后的完整 ConversationDetail。
+
+--------------------------------------------------------------------------------
+需求② 添加/修改群介绍（存于群 metadata）
+--------------------------------------------------------------------------------
+  接口：PATCH BASE/groups/:id
+  权限：仅 owner / admin。
+  请求体：
+    { "description": "这是本群的介绍……" }
+  说明：
+    - 群介绍存储在 metadata.description 字段。
+    - 前端展示入口：GET BASE/conversations/:id → metadata.description。
+    - 也可以顺带更新公告：{ "announcement": "..." }（metadata.announcement）。
+  响应：更新后的完整 ConversationDetail。
+
+--------------------------------------------------------------------------------
+需求③ 群顶部滚动播放群介绍内容（存于群 metadata）
+--------------------------------------------------------------------------------
+  这是纯前端展示功能 + 后端 metadata 配置，分两部分：
+
+  后端配置接口：PATCH BASE/groups/:id
+  权限：仅 owner / admin。
+  请求体（两种写法）：
+    a) 简单开关：{ "marquee": true }
+       —— 传 true 时，滚动文本自动使用当前群介绍（metadata.description）。
+    b) 完整配置：{ "marquee": { "enabled": true, "text": "自定义滚动文案", "speed": 50 } }
+       —— text 不传则默认用群介绍；speed 为建议滚动速度（像素/秒，前端自定实现）。
+
+  前端实现说明：
+    1. 进入群聊页时 GET BASE/conversations/:id，读取 metadata.marquee。
+    2. 若 marquee.enabled === true：在群聊天窗口顶部渲染一个横向滚动条（跑马灯），
+       滚动内容 = marquee.text（缺省时回退用 metadata.description）。
+    3. 若 marquee.enabled === false 或 marquee 不存在：不渲染滚动条。
+    4. 滚动动画由前端自行实现（CSS animation / marquee 组件均可），
+       后端只负责存取这份配置。
+    5. 群介绍被修改后（需求②），建议前端重新拉取会话详情刷新滚动内容；
+       若 marquee.text 未显式设置过，后端会在 marquee:true 时自动回填最新介绍。
+
+--------------------------------------------------------------------------------
+需求④ 群主/管理员踢人、删除群员
+--------------------------------------------------------------------------------
+  接口（两种等价写法，需认证）：
+    POST   BASE/groups/:id/kick
+        请求体：{ "user_id": "0x..." }  或  { "wallet_address": "0x..." }
+        响应：{"success": true, "message": "Member removed successfully"}
+    DELETE BASE/groups/:id/members/:userId
+        :userId 直接填钱包地址；特殊值 "me" 表示操作自己（即退群）。
+
+  权限规则：
+    - member 不能踢人 → 403。
+    - admin 可以踢 member，但不能踢 owner 或其他 admin
+      → 403 {"error":"Unauthorized: admins cannot remove owner or other admins"}。
+    - owner 可以踢任何人（除自己）。
+    - 目标不在群里 → 错误提示 "Target user is not a member of this group"。
+
+  前端建议：
+    - 在成员列表中，根据 my_role 和目标成员的 role 决定是否显示"移出群聊"按钮：
+      我的角色是 owner → 所有非自己成员可踢；
+      我的角色是 admin → 仅 role=member 的可踢；
+      我的角色是 member → 不显示踢人入口。
+    - 踢人成功后刷新成员列表（重新 GET /conversations/:id）。
+
+  附：角色管理（设/撤管理员，仅 owner）：
+    PUT BASE/groups/:id/members/:userId/role
+    请求体：{ "role": "admin" }  或  { "role": "member" }
+    响应：更新后的成员对象。
+    注意：提升为 admin 会自动解除该成员的单人禁言；不能修改 owner 自己的角色。
+
+--------------------------------------------------------------------------------
+需求⑤ 成员退群
+--------------------------------------------------------------------------------
+  接口：POST BASE/groups/:id/leave（需认证，无请求体）
+  响应：
+    普通成员 / admin 退群：{"success": true, "message": "Left group successfully"}
+    owner 退群：{"success": true, "message": "Group deleted as owner left"}
+
+  【重要警告】群主（owner）退群 = 解散整个群！
+    - 后端会直接删除整个会话及其全部成员、消息记录，不可恢复。
+    - 如需保留群聊：先 POST /groups/:id/transfer 转让给现有成员，再由原 owner 退群。
+    - 前端必须在 owner 点击"退群"时弹出强确认提示，例如：
+      "您是群主，退出将永久解散该群并删除全部聊天记录，是否确认？"
+    - 普通成员/admin 退群用普通确认即可。
+  前端也可使用 DELETE BASE/groups/:id/members/me 实现退群（等价）。
+  退群成功后前端应将该群从会话列表移除并跳回列表页。
+
+--------------------------------------------------------------------------------
+需求⑥ 禁言功能（全群禁言 + 单人禁言名单；admin 始终可讲话）
+--------------------------------------------------------------------------------
+
+  A. 全群禁言（仅 owner / admin 操作）
+     开启：POST BASE/groups/:id/mute
+       请求体：{ "muted": true, "duration_seconds": 3600 }
+       - duration_seconds 可选：传了表示限时禁言（如 3600 = 1 小时）；
+         不传表示无限期禁言（mute_until = null）。
+       响应：{ "conversation_id": "...", "is_muted": true, "mute_until": 时间戳 | null }
+     解除：POST BASE/groups/:id/unmute
+       响应：{ "conversation_id": "...", "is_muted": false, "mute_until": null }
+     状态镜像：会话详情顶层 is_muted / mute_until，以及
+       metadata.moderation = { "is_muted": ..., "mute_until": ... }，两处一致。
+
+  B. 单人禁言（仅 owner / admin 操作；不能禁言 owner/admin）
+     禁言：POST BASE/groups/:id/members/:userId/mute
+       请求体：{ "muted": true, "duration_seconds": 600, "reason": "刷屏" }
+       - duration_seconds 可选：不传 = 无限期禁言，此时响应中 muted_until = -1。
+       【坑】单人禁言的无限期标记是 muted_until: -1（数字 -1），
+             而不是 null。null 在单人禁言里表示"未禁言"。
+       - reason 可选，会随禁言状态返回，前端可展示给被禁言者。
+       响应：{ "conversation_id": "...", "user_id": "0x...", "wallet_address": "0x...",
+               "is_muted": true, "muted_until": -1 | 时间戳, "mute_reason": "刷屏" }
+       禁言 owner/admin → 400 {"error":"Cannot mute group owner or admin"}
+     解除：POST BASE/groups/:id/members/:userId/unmute
+
+  C. 查询禁言名单（群内任何成员可查）
+     GET BASE/groups/:id/muted
+     响应：
+       { "conversation_id": "...",
+         "is_group_muted": true,
+         "group_mute_until": null,
+         "muted_members": [
+           { "user_id": "0x...", "wallet_address": "0x...",
+             "muted_until": -1, "mute_reason": "刷屏" }
+         ] }
+
+  D. 禁言生效规则（后端强制，前端只需处理 403）
+     - 全群禁言开启时，普通 member 发消息（文本/语音/图片/文件都一样）→ 403：
+       {"error":"Group chat is currently muted: only admins can send messages"}
+     - 被单人禁言的 member 发消息 → 403：
+       {"error":"You have been muted in this group (Reason: 刷屏)"}
+     - owner 和 admin 【始终可以发消息】，不受全群禁言影响，也无法被单人禁言。
+     - 被单人禁言的判断：muted_until === -1（无限期）或 muted_until > 当前时间。
+
+  E. 前端 UI 建议
+     - 输入框状态：进入群聊时根据会话详情的 my_role / my_is_muted / is_muted 判断：
+       * 我是 owner/admin → 永远可输入。
+       * 我是 member 且 (群禁言中 或 我被单人禁言) → 禁用输入框并提示原因与截止时间
+         （muted_until === -1 显示"无限期"，否则显示倒计时/到期时间）。
+     - 管理面板（owner/admin 可见）：
+       * "全员禁言"开关（调 /mute、/unmute）。
+       * 成员列表每行提供"禁言 / 解除禁言"按钮（member 行才显示），
+         点击后弹窗选择时长（10分钟/1小时/1天/永久）和原因。
+       * "禁言名单"页：GET /groups/:id/muted 展示，可单个解除。
+     - 收到 403 禁言错误时，Toast 提示后端返回的 error 信息即可。
+     - 提升某人为 admin 后，后端会自动解除其单人禁言，前端刷新成员列表即可。
+
+--------------------------------------------------------------------------------
+群头像上传 / 更换（仅群主 owner）
+--------------------------------------------------------------------------------
+  上传/更换群头像（需认证，仅 owner；admin/member 调用 → 403）：
+    POST BASE/groups/:id/avatar
+    两种请求格式（与用户头像一致）：
+      a) multipart/form-data：字段 file（或 avatar / image）传图片文件；
+      b) application/json：{ "avatar_base64": "...", "mime_type": "image/png" }
+    限制：≤5MB；支持 jpeg / png / webp / gif / svg。
+    响应 201：{ "avatar_url": "/groups/<群ID>/avatar", "avatar_updated_at": 1725514800000 }
+    说明：
+      - 单头像约束：重复上传会自动删除 R2 中的旧头像，只保留最新一张。
+      - 上传成功后，会话详情/会话列表的 metadata.avatar_url 会自动更新为该地址，
+        同时会话顶层 avatar_updated_at 变化（可用于前端缓存刷新）。
+      - 非 owner（包括 admin）调用 → 403
+        {"error":"Unauthorized: only the group owner can change the group avatar"}。
+      - 【注意】群 ID 含冒号（如 0xabc...:mygroup），拼 URL 时必须
+        encodeURIComponent(groupId)。
+
+  读取群头像（需认证，仅群成员；非成员 → 403，未设置 → 404）：
+    GET BASE/groups/:id/avatar     → 图片二进制流
+    与用户头像一样：请用带 Authorization 的请求获取后转 Blob URL 展示，
+    不要把 <img src> 直接指向接口（浏览器 img 标签不带 token）。
+
+  附：群主退群解散群时，群头像会随群一起从 R2 物理删除。
+
+--------------------------------------------------------------------------------
+群成员专属昵称 group_nickname（存在"成员—群"关系上，与全局资料无关）
+--------------------------------------------------------------------------------
+  ★ 设置/修改/清除我在本群的昵称（需认证，任何群成员都可以改自己的）：
+    PATCH BASE/groups/:groupId/members/me
+    请求体：{ "group_nickname": "我在这个群的昵称" }
+      - 传 "" 或 null 表示清除昵称（恢复显示地址/@username）。
+      - 自动 trim，最长 64 字符，超长 → 400。
+    响应 200：更新后的成员对象（含 group_nickname）。
+    失败：403 不是本群成员；404 群不存在（单聊会话 id 也会 404）。
+
+  ★ 以下响应中均返回 group_nickname：
+    GET BASE/groups/:groupId           → 群详情，members[] 每项带 group_nickname（仅群成员）
+    GET BASE/groups/:groupId/members   → {"members": [...]}，每项带 group_nickname（仅群成员）
+    GET BASE/conversations             → 会话列表，每个会话带【我自己】在该群的 group_nickname
+    GET BASE/conversations/:id         → 会话详情，members[] 每项带 group_nickname
+  前端建议：群聊界面优先显示 group_nickname，其次 @username，最后地址；
+            群成员列表行可给"我的"那一行加"修改我在本群的昵称"入口。
+
+--------------------------------------------------------------------------------
+PATCH /groups/:id 完整字段速查（需求①②③都用这一个接口）
+--------------------------------------------------------------------------------
+  请求体（全部为可选，传什么改什么）：
+    {
+      "name": "群名",                              // 需求①
+      "description": "群介绍",                     // 需求②
+      "announcement": "群公告",
+      "marquee": true | { "enabled": true, "text": "...", "speed": 50 },  // 需求③
+      "metadata": { "自定义key": "任意值" }         // 顶层合并进 metadata（非整体覆盖）
+    }
+  响应：更新后的完整 ConversationDetail。
+  权限：仅 owner / admin（403 "only group owner or admin can update group settings"）。
+
+--------------------------------------------------------------------------------
+入群审批、邀请链接与群主转让
+--------------------------------------------------------------------------------
+  群设置开关（存于 metadata，服务端强制）：
+    rename_admin_only: true  -> 非 owner/admin 修改群名返回 403。
+    join_admin_only: true    -> 非 owner/admin 调 POST /groups/:id/members 返回 403；
+                               请改走申请接口。
+  说明：群资料接口原本即仅 owner/admin 可改；metadata 请求值是【顶层合并】，不是整体替换。
+
+  生成邀请链接 / 二维码（仅 owner/admin）：
+    POST BASE/groups/:id/invite-links
+    请求：{ "expires_in_seconds": 3600, "max_uses": 10 }  // 均可省略
+    响应：{ "token": "...", "url": "https://api.chatnice.top/g/<token|slug>",
+            "expires_at": 时间戳|null, "max_uses": 数字|null }
+    二维码内容直接使用响应 url（https 落地页：无 App 引导下载、有 App 拉起入群；
+    客户端同时兼容旧 chaintalk://group-invite/<token> 深链）。
+
+  消费邀请链接（需认证；群邀请落地页使用）：
+    POST BASE/groups/join-by-token
+    请求：{ "token": "...", "message": "可选申请说明", "retry": false }
+    直接入群 / 已被批准且刷新链接：201
+      { "status":"joined", "member": {...}, "conversation": { 完整 ConversationDetail } }
+    审批中：202
+      {
+        "status":"pending", "pending":true,
+        "request": { 申请记录 }, "join_request": { 申请记录 },
+        "group": {
+          "id":"群ID", "name":"群名", "avatar_url":"https://api.chatnice.top/groups/.../avatar"|null,
+          "avatar_updated_at": 时间戳|null, "member_count": 7,
+          "metadata": { "join_admin_only": true, "...": "现有 metadata" }
+        }
+      }
+      request 与 join_request 是同一条记录；旧客户端可继续读取 join_request。
+    被拒绝：200
+      { "status":"rejected", "pending":false, "request":{ 被拒记录 },
+        "join_request":{ 被拒记录 }, "group":{ 同上群预览 } }
+      落地页收到 rejected 后恢复“申请加入群聊”按钮；用户再次点击时，调用同一接口但
+      传 { "retry": true }，才会创建新的 pending 申请。单纯刷新 rejected 页面不会自动重提。
+    token 不存在/无效 → 404；已过期 → 410；达到 max_uses → 429；均返回 { "error":"..." }。
+
+  主动申请入群（需认证）：
+    POST BASE/groups/:id/join-requests
+    请求：{ "message": "可选申请说明" }
+    响应 201：申请记录（同一用户同一群仅允许一条 pending）。
+  管理员审批：
+    GET  BASE/groups/:id/join-requests?status=pending     // 仅 owner/admin
+    POST BASE/groups/:id/join-requests/:requestId/approve // 同意后写入 member
+    POST BASE/groups/:id/join-requests/:requestId/reject
+    申请记录含 wallet_address、nickname、avatar_url、message、status、created_at、handled_by、handled_at。
+    申请、同意/拒绝、成功入群会写入 type="system" 的会话消息；其 content 是 JSON 事件，
+    与普通消息一样通过 GET /conversations/:id/messages 与 /sync 获取。
+
+  转让群主（仅当前 owner；目标必须已在群内）：
+    POST BASE/groups/:id/transfer
+    请求：{ "new_owner_user_id": "..." } 或 { "wallet_address": "0x..." }
+    响应：{ "group_id":"...", "previous_owner_user_id":"...",
+            "new_owner_user_id":"...", "owner_address":"0x..." }
+    服务端以 D1 原子批处理保证单群主：目标升为 owner，原 owner 自动降为 admin，
+    conversations.owner_address 同步更新。转让完成后原群主可调用 /leave 正常退群。
+
+================================================================================
+六、语音 / 图片 / 文件消息
+================================================================================
+
+三种上传都同时支持两种格式：
+  a) multipart/form-data：字段 file（语音也可用 audio）、conversation_id 等；
+  b) application/json：xxx_base64 字段传 Base64 编码内容。
+上传成功后消息会出现在对应会话中（type = voice / image / file），走同样的
+ACK / 同步 / 过期 / 焚毁流程。上传前同样会做禁言检查（被禁言 → 403）。
+
+语音：
+  POST BASE/voice/upload（≤10MB，webm/mp3/mpeg/ogg/wav/mp4(m4a)/aac）
+    JSON 请求体：{ "audio_base64": "...", "conversation_id": "...", "duration": 5.2,
+                   "mime_type": "audio/webm", "retention": "permanent",
+                   "expires_in_seconds": 86400, "burn_after_seconds": 30 }
+    响应 201：{ "message": { MessageRow, "type": "voice", "content": "[Voice: 5.2s]" },
+                "voice": { "object_key": "...", "duration": 5.2, "mime_type": "...", "size": ... } }
+  播放：GET BASE/voice/:messageId        → 音频二进制流（直接喂给 <audio>）
+  元数据：GET BASE/voice/:messageId/meta → JSON
+
+图片：
+  POST BASE/images/upload（≤20MB，jpeg/png/webp/gif/svg/bmp/heic/avif）
+    JSON 请求体：{ "image_base64": "...", "conversation_id": "...",
+                   "caption": "可选配文", "width": 800, "height": 600, "file_name": "a.png" }
+  查看：GET BASE/images/:messageId（inline 显示）  /meta 取元数据
+
+文件：
+  POST BASE/files/upload（≤50MB，任意格式）
+    JSON 请求体：{ "file_base64": "...", "file_name": "合同.pdf",
+                   "conversation_id": "...", "caption": "可选说明" }
+  下载：GET BASE/files/:messageId（attachment 下载）  /meta 取元数据
+
+说明：非群成员访问媒体 → 403；消息已过期/焚毁/撤回 → 404。
+      请用带 Authorization 的请求获取媒体后转 Blob URL 展示，
+      不要把 <img src> 直接指向接口（浏览器 img 标签不带 token）。
+
+================================================================================
+七、用户资料 / 好友 / 黑名单（按需对接）
+================================================================================
+
+个人资料：
+  GET  BASE/users/me                  → 本人完整资料（含 username 字段）
+  PATCH BASE/users/me/metadata        请求体：{"public_metadata": {...}, "private_metadata": {...}}
+                                      （全量替换式更新；public 任何人可见，private 仅自己）
+  POST BASE/users/me/avatar           ≤5MB，multipart file 或 JSON {"avatar_base64": "..."}
+                                      → {"avatar_url": "/users/0x.../avatar", ...}
+
+★ 全局唯一用户名（@username，用于搜索添加好友）：
+  设置/修改自己的用户名（需认证）：
+    PUT BASE/users/me/username
+    请求体：{ "username": "xiaoming" }
+    规则：3~20 位，仅限小写字母、数字、下划线；不区分大小写（自动转小写），
+          可带 @ 前缀（自动去除）；全局唯一，先到先得。
+    成功响应：{ "user": { 完整资料, "username": "xiaoming" } }
+    失败：400 格式非法（"Invalid username: ..."）；
+          409 已被占用（{"error":"Username is already taken"}）。
+  检查用户名是否可用（无需认证，适合注册页输入时实时校验）：
+    GET BASE/users/check-username/xiaoming
+    响应：{ "username": "xiaoming", "available": true,  "reason": null }
+          { "username": "xiaoming", "available": false, "reason": "taken" | "invalid_format" }
+  按用户名精确查找用户（无需认证，搜索添加好友的核心接口）：
+    GET BASE/users/by-username/xiaoming
+    响应：{ "user": { "id": "0x...", "wallet_address": "0x...", "username": "xiaoming",
+                      "public_metadata": {...}, "avatar_url": "...",
+                      "avatar_updated_at": ..., "created_at": ..., "updated_at": ... } }
+    未注册该用户名 → 404 {"error":"User not found"}
+  说明：设置用户名后，username 字段会出现在所有用户资料、好友列表、
+        推荐好友接口的返回中；前端展示时优先显示 @username，其次显示地址。
+
+查看他人（无需认证）：
+  GET BASE/users/:address             → 仅 public_metadata + username + avatar_url
+  GET BASE/users/:address/avatar      → 头像图片流
+
+好友（全部需认证）：
+  ★ 推荐好友（"可能认识的人"）：
+    GET BASE/friends/recommendations?q=<关键词>&limit=20
+    说明：
+      - 推荐池 = 平台所有用户中，排除【自己、已是好友、我拉黑的、拉黑我的】之后的人。
+      - 排序规则：与我【同群数量】多的人排在最前（shared_groups 字段），其余按最近活跃排序。
+      - q 可选：按钱包地址 / 全局唯一用户名 username / 公开资料（昵称等）模糊搜索。
+      - limit 可选：1~50，默认 20。
+    响应：
+      { "recommendations": [
+          { "address": "0x...",
+            "username": "xiaoming" 或 null,     // 全局唯一用户名
+            "public_metadata": { "nickname": "...", "...": "..." },
+            "avatar_url": "/users/0x.../avatar" 或 null,
+            "avatar_updated_at": 1725514800000 或 null,
+            "shared_groups": 2 }        // 与我共同的群聊数量，前端可显示"2 个共同群聊"
+      ] }
+    前端建议：推荐列表每项配"加好友"按钮 → 点击调下方 POST /friends，
+      成功后该项从推荐列表消失（后端自动排除已是好友的人）。
+
+  ★ 搜索添加好友完整流程（输入框同时支持地址和用户名）：
+    const kw = input.trim();
+    if (/^0x[0-9a-fA-F]{40}$/.test(kw)) {
+      // 情况1：完整钱包地址 → 直接精确查公开资料
+      GET BASE/users/<kw>            （404 = 该地址未注册过）
+    } else {
+      // 情况2：用户名（可带@）→ 先精确查唯一用户名
+      const r = await GET BASE/users/by-username/<kw去掉@并转小写>;
+      //   200 → 找到唯一用户，直接展示资料卡 + "加好友"按钮
+      //   404 → 没有精确匹配，退回模糊搜索：
+      GET BASE/friends/recommendations?q=<kw>   （需认证）
+    }
+    找到用户后 → POST BASE/friends { "friend_address": user.wallet_address }
+
+  ★ 添加好友：
+    POST BASE/friends
+    请求体：{ "friend_address": "0x...", "alias": "备注名（可选）", "tags": ["标签（可选）"] }
+    响应 201：
+      { "friend": { "friend_address": "0x...", "alias": "备注名", "tags": ["..."],
+                    "public_metadata": {...}, "avatar_url": "...",
+                    "avatar_updated_at": ..., "created_at": ..., "updated_at": ... } }
+    失败：400 地址非法/加自己；403 被对方拉黑
+      {"error":"Cannot add user: you have been blocked by this user"}。
+    说明：重复添加同一人会更新备注和标签（幂等），不会报错。
+
+  ★ 删除好友：
+    DELETE BASE/friends/:address
+    响应：{"success": true}（不存在时 success 为 false）
+    ★ 删除后双方都无法再在单聊里发消息（发送方收到 403 "no longer friends"），
+      历史消息保留；重新互相添加好友后恢复聊天。
+    前端建议：弹确认框"删除后将无法与该好友聊天，是否确认？"；成功后从好友列表移除。
+
+  好友列表：GET  BASE/friends?tag=x     → {"friends": [FriendProfile...]}，可按标签过滤
+  单个好友：GET  BASE/friends/:address  → 404 表示不是好友
+  改备注/标签：PATCH BASE/friends/:address  {"alias": "...", "tags": [...]}
+  设置标签：POST BASE/friends/:address/tags   {"tags": ["..."]}
+  全部标签：GET  BASE/friends/tags
+
+好友申请（全部需认证）：
+  ★ 提交申请（可带验证消息）：
+    POST BASE/friend-requests
+    请求体：{ "to_address": "0x...", "message": "我是 xxx，验证消息可选，最长 500 字" }
+           （to_address 也可用 friend_address / address 字段名）
+    响应 201：{"request": FriendRequest}
+    失败：400 地址非法/加自己/已有待处理申请（"already pending"）/已是好友（"already friends"）；
+          403 被对方拉黑或你拉黑了对方（"blocked"）。
+    说明：被拒绝后可重新提交（旧记录重置为 pending，对方会重新收到红点提醒）。
+
+  ★ 收到的申请列表（含未读数）：
+    GET BASE/friend-requests?direction=incoming
+    响应：{ "requests": [FriendRequest...], "unread_count": 2 }
+      - 只返回 status=pending 的收到申请，按时间倒序。
+      - ★ 拉取该列表后这些申请自动标记为已读（红点清零），unread_count 是拉取前的未读数。
+      - direction=outgoing：我发出的申请（含 pending/accepted/rejected 全部状态，倒序）。
+    FriendRequest 字段：
+      { "id", "from_address", "to_address", "message",
+        "status": "pending"|"accepted"|"rejected", "is_read": bool,
+        "from_username", "from_avatar_url", "to_username", "to_avatar_url",
+        "created_at", "updated_at" }
+
+  ★ 同意申请（建立双方联系人关系）：
+    POST BASE/friend-requests/:id/accept
+    响应：{"success": true, "friend_address": "0x..."}
+    - 同意后【双向】写入好友关系，双方立即可单聊（满足"互加好友才能聊天"的规则）。
+    - 只有接收方能操作 → 否则 403；重复同意/已拒绝 → 400；id 不存在 → 404。
+
+  ★ 拒绝申请：
+    POST BASE/friend-requests/:id/reject
+    响应：{"success": true}
+
+  ★ 未读数（右上角红点 / 99+）：
+    GET BASE/friend-requests/unread-count
+    响应：{"unread_count": 3}
+    - 统计"收到的、未读的、pending 申请"数量；前端展示时自行封顶 99+。
+    - 建议轮询该接口刷新红点；进入申请列表页时调 GET ?direction=incoming 即自动清零。
+
+黑名单：
+  GET    BASE/blacklist
+  POST   BASE/blacklist               {"blocked_address": "0x...", "reason": "可选"}
+  DELETE BASE/blacklist/:address
+  被我拉黑的人无法向我发起单聊、发消息或提交好友申请（他会收到 403）。
+
+================================================================================
+举报与证据图片（私有，不会发送到聊天会话）
+================================================================================
+  所有举报接口都需 Authorization: Bearer <token>。举报内容与证据不会生成消息，
+  不会推送给被举报者，也没有面向客户端的证据下载接口。
+
+  1) 先上传证据图片（必须 multipart/form-data）：
+     POST BASE/reports/evidence
+     表单文件字段：file（也兼容 image / evidence）
+     支持 JPEG / PNG / WebP / GIF / HEIC / AVIF，最大 20MB。
+     响应 201：
+       { "object_key":"report-evidence/<当前用户>/<uuid>.png",
+         "mime_type":"image/png", "size":12345, "created_at": 时间戳 }
+     仅保存 R2 私有对象与内部元数据，不会向任何会话写入图片消息。
+
+  2) 提交举报：
+     POST BASE/reports
+     请求（举报用户，默认）：
+       {
+         "reported_user_id": "可选；若传入必须和钱包地址对应",
+         "reported_wallet_address": "0x...（举报用户时必填）",
+         "category": "fraud",
+         "message_ids": ["可选；只能填当前用户可见的消息 ID"],
+         "description": "可选，最多 4000 字符",
+         "evidence_keys": ["上一步返回的 object_key"]
+       }
+     请求（举报群）：
+       {
+         "target_type": "group",
+         "reported_group_id": "<群会话 id（必填；举报人必须是该群成员）>",
+         "category": "fraud",
+         "message_ids": ["可选；同上"], "description": "可选", "evidence_keys": ["可选"]
+       }
+       群举报不要传 reported_wallet_address / reported_user_id（服务端存 null）。
+       群不存在返回 404；举报人不是群成员返回 403。
+     target_type 只允许 user / group，缺省为 user（旧请求体无需改动）。
+     category 只允许：harassment / fraud / account_theft / infringement /
+       counterfeit / impersonation / minor_protection / irrational_fandom。
+     evidence_keys 最多 10 个；每个必须由当前账号上传且只能绑定一次。
+     响应 201：{ "report": { "id":"...", "status":"received", "created_at": 时间戳,
+                               "target_type":"user|group", "reported_group_id":null|"群id",
+                               "reported_wallet_address":"0x..."|null,
+                               "message_ids":[], "evidence_keys":[] } }
+
+  3) 查询我的举报：
+     GET BASE/reports?limit=50（limit 1~100，可省略）
+     响应：{ "reports": [ ... ] }，只返回当前认证账号自己提交的举报。
+
+================================================================================
+附录：本项目部署信息（运维记录，前端可忽略）
+================================================================================
+  【当前生效部署 = 新账号】2026-09-08 从旧账号迁移至此
+  Cloudflare 账号：zsen9387@gmail.com（Account ID: 1f01bbb586be4dd45ae9e61afc647c44）
+  Worker 名称：web3-chat-worker
+  线上地址：https://api.chatnice.top（自定义域名，国内直连，主用）
+            https://web3-chat-worker.zsen9387.workers.dev（备用，国内需代理）
+  D1 数据库：web3_chat_db
+    database_id: a1831a68-c87c-4bcd-97e1-19cf80463258
+    binding: DB（代码内固定使用此绑定名，勿改）
+    迁移状态：0001~0007 已全部应用到远端（0006 = 全局唯一用户名，0007 = 群头像）
+  R2 存储桶：web3-chat-voice（binding: VOICE_BUCKET，存语音/图片/文件/头像）
+  Cron：每分钟触发一次过期消息清扫
+  重新部署命令：pnpm run deploy
+  注意：旧账号（迁移前）的 Worker / D1 / R2 与本环境无任何关联。
+
+================================================================================
+八、前端集成速查清单（Checklist）
+================================================================================
+[ ] 1. 钱包连接后：POST /auth/nonce → personal_sign → POST /auth/verify，存 token。
+[ ] 2. 所有请求统一注入 Authorization: Bearer <token>；401 时跳回登录重新签名。
+[ ] 3. 会话列表：GET /conversations 渲染；进入会话 GET /conversations/:id。
+[ ] 4. 消息：POST /conversations/:id/messages 发送；GET /sync 轮询收新消息
+       （保存 sync_timestamp 作为下次 since）。
+[ ] 5. 收到新消息后调 POST /messages/ack 做送达 ACK；用户真正阅读后调 /messages/read。
+[ ] 6. 群资料页：owner/admin 显示编辑入口（PATCH /groups/:id），
+       普通成员只读展示 metadata.name / metadata.description。
+[ ] 7. 群聊页顶部：metadata.marquee.enabled 为 true 时渲染跑马灯，
+       内容用 marquee.text，缺省回退 metadata.description。
+[ ] 8. 成员管理：按 my_role 显示踢人/禁言/设管理员按钮；
+       owner 退群弹"解散群"强确认。
+[ ] 9. 输入框：member 且（群禁言中或本人被单人禁言）时禁用并提示；
+       发送遇 403 时 Toast 后端 error。
+[ ] 10. 媒体消息：上传走 /voice|images|files/upload，展示用带 token 的 GET 转 Blob。
+[ ] 11. 注意数据形态坑：auth/verify 的 metadata 是字符串需 parse；
+       消息 mentions 是 JSON 字符串；单人无限期禁言 muted_until === -1。
+[ ] 12. 好友功能：GET /friends/recommendations 渲染"可能认识的人"（按共同群聊排序），
+       点击加好友调 POST /friends；删除好友调 DELETE /friends/:address 并弹确认。
+[ ] 13. 用户名体系：引导用户设置唯一用户名 PUT /users/me/username（注册页用
+       /users/check-username 实时校验占用）；搜索添加好友时按"完整地址→/users/:addr、
+       用户名→/users/by-username/:name、其余→/friends/recommendations?q="的顺序查找。
+[ ] 14. 群头像：群资料页展示 metadata.avatar_url（带 token GET 转 Blob）；
+       仅当 my_role === "owner" 时显示"更换群头像"入口（POST /groups/:id/avatar）。
+================================================================================

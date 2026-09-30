@@ -4,6 +4,7 @@ import { normalizeAddress } from '../db';
 
 export interface FriendProfile {
   friend_address: string;
+  username: string | null;
   alias: string | null;
   tags: string[];
   public_metadata: Record<string, any>;
@@ -29,6 +30,20 @@ export interface AddFriendOptions {
 export interface UpdateFriendOptions {
   alias?: string | null;
   tags?: string[];
+}
+
+export interface RecommendedUser {
+  address: string;
+  username: string | null;
+  public_metadata: Record<string, any>;
+  avatar_url: string | null;
+  avatar_updated_at: number | null;
+  shared_groups: number;
+}
+
+export interface RecommendationOptions {
+  q?: string;
+  limit?: number;
 }
 
 function parseJsonSafe(val: string | null | undefined): any {
@@ -117,6 +132,7 @@ export async function getFriends(
       f.tags,
       f.created_at,
       f.updated_at,
+      u.username,
       u.public_metadata,
       u.avatar_key,
       u.avatar_updated_at
@@ -130,6 +146,7 @@ export async function getFriends(
     tags: string;
     created_at: number;
     updated_at: number;
+    username: string | null;
     public_metadata: string | null;
     avatar_key: string | null;
     avatar_updated_at: number | null;
@@ -153,6 +170,7 @@ export async function getFriends(
 
     results.push({
       friend_address: r.friend_address,
+      username: r.username ?? null,
       alias: r.alias,
       tags: parsedTags,
       public_metadata: parseJsonSafe(r.public_metadata),
@@ -181,6 +199,7 @@ export async function getFriend(
       f.tags,
       f.created_at,
       f.updated_at,
+      u.username,
       u.public_metadata,
       u.avatar_key,
       u.avatar_updated_at
@@ -193,6 +212,7 @@ export async function getFriend(
     tags: string;
     created_at: number;
     updated_at: number;
+    username: string | null;
     public_metadata: string | null;
     avatar_key: string | null;
     avatar_updated_at: number | null;
@@ -212,6 +232,7 @@ export async function getFriend(
 
   return {
     friend_address: row.friend_address,
+    username: row.username ?? null,
     alias: row.alias,
     tags: parsedTags,
     public_metadata: parseJsonSafe(row.public_metadata),
@@ -300,6 +321,71 @@ export async function removeFriend(
   ).bind(user, friend).run();
 
   return (res.meta?.changes ?? 0) > 0;
+}
+
+export async function getFriendRecommendations(
+  db: D1Database,
+  userId: string,
+  options: RecommendationOptions = {}
+): Promise<RecommendedUser[]> {
+  const user = normalizeAddress(userId);
+  const limit = Math.min(Math.max(Math.floor(options.limit ?? 20), 1), 50);
+  const keyword = options.q?.trim().toLowerCase();
+
+  let keywordClause = '';
+  const params: unknown[] = [user, user, user, user, user];
+  if (keyword) {
+    keywordClause = `AND (lower(u.id) LIKE ? OR lower(COALESCE(u.username, '')) LIKE ? OR lower(COALESCE(u.public_metadata, '')) LIKE ?)`;
+    const like = `%${keyword}%`;
+    params.push(like, like, like);
+  }
+  params.push(limit);
+
+  // Rank users who share group conversations with me first ("people you may know"),
+  // excluding myself, existing friends, and blacklist in both directions.
+  const rowsRes = await db.prepare(`
+    SELECT
+      u.id AS address,
+      u.username,
+      u.public_metadata,
+      u.avatar_key,
+      u.avatar_updated_at,
+      (
+        SELECT COUNT(DISTINCT cm_theirs.conversation_id)
+        FROM conversation_members cm_theirs
+        JOIN conversation_members cm_mine
+          ON cm_mine.conversation_id = cm_theirs.conversation_id
+         AND cm_mine.user_id = ?
+        JOIN conversations conv
+          ON conv.id = cm_theirs.conversation_id
+         AND conv.type IN ('group', 'club')
+        WHERE cm_theirs.user_id = u.id
+      ) AS shared_groups
+    FROM users u
+    WHERE u.id != ?
+      AND u.id NOT IN (SELECT friend_address FROM friends WHERE user_id = ?)
+      AND u.id NOT IN (SELECT blocked_address FROM blacklist WHERE user_id = ?)
+      AND u.id NOT IN (SELECT user_id FROM blacklist WHERE blocked_address = ?)
+      ${keywordClause}
+    ORDER BY shared_groups DESC, u.updated_at DESC
+    LIMIT ?
+  `).bind(...params).all<{
+    address: string;
+    username: string | null;
+    public_metadata: string | null;
+    avatar_key: string | null;
+    avatar_updated_at: number | null;
+    shared_groups: number;
+  }>();
+
+  return (rowsRes.results ?? []).map((r) => ({
+    address: r.address,
+    username: r.username ?? null,
+    public_metadata: parseJsonSafe(r.public_metadata),
+    avatar_url: r.avatar_key ? `/users/${r.address}/avatar` : null,
+    avatar_updated_at: r.avatar_updated_at ?? null,
+    shared_groups: r.shared_groups ?? 0,
+  }));
 }
 
 // ---------------- BLACKLIST MANAGEMENT ----------------

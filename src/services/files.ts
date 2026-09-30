@@ -79,22 +79,20 @@ export async function uploadFileMessage(
     },
   });
 
-  // 6. Save message and file metadata in D1 in a single atomic batch
-  const msgStmt = db.prepare(`
+  // 6. Save message and file metadata in D1
+  await db.prepare(`
     INSERT INTO messages (
       id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds
     ) VALUES (?, ?, ?, 'file', ?, ?, 'pending', ?, ?, ?)
-  `).bind(messageId, params.conversation_id, senderId, content, retention, expiresAt, now, burnAfterSeconds);
+  `).bind(messageId, params.conversation_id, senderId, content, retention, expiresAt, now, burnAfterSeconds).run();
 
-  const fileStmt = db.prepare(`
+  await db.prepare(`
     INSERT INTO file_messages (
       id, message_id, object_key, file_name, mime_type, size, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).bind(fileId, messageId, objectKey, safeFileName, mimeType, byteLength, now);
+  `).bind(fileId, messageId, objectKey, safeFileName, mimeType, byteLength, now).run();
 
-  const convStmt = db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, params.conversation_id);
-
-  await db.batch([msgStmt, fileStmt, convStmt]);
+  await db.prepare('UPDATE conversations SET updated_at = ?, last_message_at = ? WHERE id = ?').bind(now, now, params.conversation_id).run();
 
   const message: MessageRow = {
     id: messageId,

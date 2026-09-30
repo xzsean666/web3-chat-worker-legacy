@@ -56,13 +56,30 @@ export class MockR2Bucket implements R2Bucket {
     } as any;
   }
 
-  async get(key: string): Promise<R2ObjectBody | null> {
+  async get(
+    key: string,
+    options?: R2GetOptions
+  ): Promise<R2ObjectBody | null> {
     const stored = this.store.get(key);
     if (!stored) return null;
 
+    // 支持 R2 range 读取（offset/length），供分段下载测试。
+    let data = stored.data;
+    const rawRange = options?.range as
+      | { offset?: number; length?: number }
+      | Headers
+      | undefined;
+    const range =
+      rawRange instanceof Headers ? undefined : rawRange;
+    const offset = range?.offset;
+    if (offset !== undefined) {
+      const length = range?.length ?? stored.data.length - offset;
+      data = stored.data.subarray(offset, offset + length);
+    }
+
     const stream = new ReadableStream({
       start(controller) {
-        controller.enqueue(stored.data);
+        controller.enqueue(data);
         controller.close();
       },
     });
@@ -78,10 +95,10 @@ export class MockR2Bucket implements R2Bucket {
       customMetadata: stored.customMetadata ?? {},
       body: stream,
       bodyUsed: false,
-      arrayBuffer: async () => stored.data.buffer.slice(stored.data.byteOffset, stored.data.byteOffset + stored.data.byteLength),
-      text: async () => new TextDecoder().decode(stored.data),
-      json: async () => JSON.parse(new TextDecoder().decode(stored.data)),
-      blob: async () => new Blob([stored.data]),
+      arrayBuffer: async () => data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+      text: async () => new TextDecoder().decode(data),
+      json: async () => JSON.parse(new TextDecoder().decode(data)),
+      blob: async () => new Blob([data]),
       writeHttpMetadata: () => {},
       checksums: { md5: undefined, sha1: undefined, sha256: undefined, sha384: undefined, sha512: undefined },
     } as any;

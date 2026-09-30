@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
 
-const BASE_URL = process.env.WORKER_URL || process.env.WORKER_BASE_URL || 'https://web3-chat-worker.002788.xyz';
+const BASE_URL = process.env.WORKER_URL || process.env.WORKER_BASE_URL || 'https://api.chatnice.top';
 
 // Colors for terminal output
 const colors = {
@@ -136,6 +136,20 @@ async function main() {
 
     logSuccess(`${user.name} authenticated (User ID: ${user.userId})`);
   }
+
+  // 2.5 Mutual Friendship (direct messaging requires both sides to be friends)
+  logStep('Step 2.5', 'Mutual Friendship (prerequisite for 1:1 chat)');
+  for (const [from, to] of [[alice, bob], [bob, alice]] as const) {
+    const friendRes = await request('/friends', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${from.token}` },
+      body: JSON.stringify({ friend_address: to.address }),
+    });
+    if (friendRes.status !== 201) {
+      throw new Error(`${from.name} failed to add ${to.name} as friend: ${JSON.stringify(friendRes.data)}`);
+    }
+  }
+  logSuccess(`Alice and Bob are mutual friends (direct chat enabled)`);
 
   // 3. Direct 1-on-1 Conversation
   logStep('Step 3', 'Direct 1-on-1 Chat & Idempotency');
@@ -837,6 +851,17 @@ async function main() {
     throw new Error(`Delete friend failed: ${JSON.stringify(delFriendRes.data)}`);
   }
   logSuccess(`Alice removed Bob from friends list`);
+
+  // After deletion, direct chat is blocked in both directions until re-added
+  const afterDeleteMsgRes = await request(`/conversations/${directConvId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bob.token}` },
+    body: JSON.stringify({ content: 'Can I still talk to Alice?' }),
+  });
+  if (afterDeleteMsgRes.status !== 403) {
+    throw new Error(`Expected HTTP 403 for direct message after friend deletion, got: ${afterDeleteMsgRes.status}`);
+  }
+  logSuccess(`Verified direct chat is blocked after friend deletion (HTTP 403)`);
 
   // 15. Blacklist Enforcement & 1:1 Chat Blocking (TASK-016)
   logStep('Step 15', 'Blacklist Enforcement & 1:1 Chat Blocking (TASK-016)');

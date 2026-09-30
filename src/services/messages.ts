@@ -12,7 +12,7 @@ export interface MessageWithSender extends MessageRow {
 
 export interface SendMessageOptions {
   content?: string;
-  type?: 'text' | 'voice' | 'image' | 'file';
+  type?: 'text' | 'voice' | 'image' | 'file' | 'system' | 'sticker';
   retention?: 'permanent' | 'on_read';
   expires_in_seconds?: number;
   burn_after_seconds?: number;
@@ -26,7 +26,14 @@ export interface GetMessagesOptions {
 
 export interface SyncOptions {
   since?: number;
+  // 同毫秒决胜游标（指南 阶段4③）：与 since 搭配，(created_at, id) 全序防漏单
+  since_id?: string;
   limit?: number;
+}
+
+export interface SyncCursor {
+  ts: number;
+  id: string;
 }
 
 export interface RecipientReceipt {
@@ -49,16 +56,6 @@ export interface MessageReceiptsSummary {
   receipts: RecipientReceipt[];
 }
 
-let lastMonotonicTimestamp = 0;
-export function getMonotonicNow(): number {
-  let now = Date.now();
-  if (now <= lastMonotonicTimestamp) {
-    now = lastMonotonicTimestamp + 1;
-  }
-  lastMonotonicTimestamp = now;
-  return now;
-}
-
 export async function sendMessage(
   db: D1Database,
   conversationId: string,
@@ -71,6 +68,14 @@ export async function sendMessage(
   const type = options.type || 'text';
   if (type === 'text' && (!options.content || !options.content.trim())) {
     throw new Error('Message content cannot be empty for text messages');
+  }
+  // sticker 消息：content 为 R2 贴纸键主体（分类/文件名，不含 webp/ 前缀与 .webp 后缀），
+  // 形如 animated/U+2764_1、flags/CN；二进制由公开路由 GET /stickers/<content>.webp 提供。
+  if (type === 'sticker') {
+    const content = options.content?.trim() ?? '';
+    if (!/^[a-z_]+\/[A-Za-z0-9+_.-]{1,90}$/.test(content)) {
+      throw new Error('Invalid sticker content: expected "<category>/<name>" (e.g. "animated/U+2764_1")');
+    }
   }
 
   const retention = options.retention || 'permanent';
@@ -85,20 +90,18 @@ export async function sendMessage(
       ? options.expires_in_seconds * 1000
       : 24 * 60 * 60 * 1000;
 
-  const now = getMonotonicNow();
+  const now = Date.now();
   const expiresAt = now + expiresInMs;
   const messageId = crypto.randomUUID();
   const content = options.content ? options.content.trim() : null;
 
-  const insertStmt = db.prepare(`
+  await db.prepare(`
     INSERT INTO messages (
       id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds, mentions
     ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-  `).bind(messageId, conversationId, senderId, type, content, retention, expiresAt, now, burnAfterSeconds, mentionsJson);
+  `).bind(messageId, conversationId, senderId, type, content, retention, expiresAt, now, burnAfterSeconds, mentionsJson).run();
 
-  const updateStmt = db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, conversationId);
-
-  await db.batch([insertStmt, updateStmt]);
+  await db.prepare('UPDATE conversations SET updated_at = ?, last_message_at = ? WHERE id = ?').bind(now, now, conversationId).run();
 
   return {
     id: messageId,
@@ -116,82 +119,6 @@ export async function sendMessage(
     burn_after_seconds: burnAfterSeconds,
     mentions: mentionsJson,
   };
-}
-
-export async function sendMessagesBatch(
-  db: D1Database,
-  conversationId: string,
-  senderId: string,
-  messagesOptions: SendMessageOptions[]
-): Promise<MessageRow[]> {
-  if (!messagesOptions || messagesOptions.length === 0) {
-    return [];
-  }
-
-  // 1. Check membership, blacklist, group mute, and individual mute ONCE for all messages
-  await assertCanSendMessage(db, conversationId, senderId);
-
-  const now = Date.now();
-  const statements: D1PreparedStatement[] = [];
-  const results: MessageRow[] = [];
-
-  for (let i = 0; i < messagesOptions.length; i++) {
-    const options = messagesOptions[i];
-    const type = options.type || 'text';
-    if (type === 'text' && (!options.content || !options.content.trim())) {
-      throw new Error(`Message at index ${i} has empty content for text message`);
-    }
-
-    const retention = options.retention || 'permanent';
-    const burnAfterSeconds = retention === 'on_read' ? Math.max(30, Number(options.burn_after_seconds) || 30) : null;
-    const mentionsList = Array.isArray(options.mentions)
-      ? options.mentions.map((m) => m.toLowerCase().trim()).filter(Boolean)
-      : [];
-    const mentionsJson = JSON.stringify(mentionsList);
-
-    const expiresInMs =
-      options.expires_in_seconds && options.expires_in_seconds > 0
-        ? options.expires_in_seconds * 1000
-        : 24 * 60 * 60 * 1000;
-
-    const msgCreatedAt = now + i;
-    const expiresAt = msgCreatedAt + expiresInMs;
-    const messageId = crypto.randomUUID();
-    const content = options.content ? options.content.trim() : null;
-
-    statements.push(
-      db.prepare(`
-        INSERT INTO messages (
-          id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds, mentions
-        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-      `).bind(messageId, conversationId, senderId, type, content, retention, expiresAt, msgCreatedAt, burnAfterSeconds, mentionsJson)
-    );
-
-    results.push({
-      id: messageId,
-      conversation_id: conversationId,
-      sender_id: senderId,
-      type,
-      content,
-      retention,
-      status: 'pending',
-      expires_at: expiresAt,
-      delivered_at: null,
-      read_at: null,
-      created_at: msgCreatedAt,
-      recalled_at: null,
-      burn_after_seconds: burnAfterSeconds,
-      mentions: mentionsJson,
-    });
-  }
-
-  statements.push(
-    db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now + messagesOptions.length, conversationId)
-  );
-
-  await db.batch(statements);
-
-  return results;
 }
 
 export async function getConversationMessages(
@@ -234,7 +161,7 @@ export async function getConversationMessages(
                 AND (? - mr.timestamp) >= (COALESCE(m.burn_after_seconds, 30) * 1000)
             )
           )
-          AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?))
+          AND m.created_at >= ? AND (m.created_at > ? OR m.id > ?)
         ORDER BY m.created_at ASC, m.id ASC
         LIMIT ?
       `;
@@ -298,10 +225,21 @@ export async function getSyncUpdates(
   db: D1Database,
   userId: string,
   options: SyncOptions = {}
-): Promise<{ messages: MessageWithSender[]; sync_timestamp: number; has_more: boolean }> {
+): Promise<{ messages: MessageWithSender[]; sync_timestamp: number; has_more: boolean; next_cursor: SyncCursor | null }> {
   const limit = Math.min(Math.max(Number(options.limit) || 100, 1), 200);
   const now = Date.now();
   const since = options.since ? Number(options.since) : 0;
+  const sinceId = options.since_id ?? '';
+
+  // (created_at, id) 全序决胜：仅在客户端传 since_id 时启用同毫秒续拉；
+  // 无 since_id 时保持旧语义（created_at > since），向后兼容老客户端。
+  // 两种形式的首个约束都是 created_at 的纯范围比较，可下推到
+  // idx_messages_conv_created / idx_messages_created_at；有 since_id 时的
+  // 残差 OR 仅在 created_at = since 的同毫秒行上评估。
+  const cursorClause = sinceId
+    ? 'm.created_at >= ? AND (m.created_at > ? OR m.id > ?)'
+    : 'm.created_at > ?';
+  const cursorParams: unknown[] = sinceId ? [since, since, sinceId] : [since];
 
   const query = `
     SELECT m.*, u.wallet_address AS sender_address
@@ -309,7 +247,7 @@ export async function getSyncUpdates(
     JOIN users u ON u.id = m.sender_id
     JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
     WHERE m.expires_at > ?
-      AND m.created_at > ?
+      AND ${cursorClause}
       AND NOT (
         m.retention = 'on_read'
         AND EXISTS (
@@ -322,16 +260,18 @@ export async function getSyncUpdates(
     LIMIT ?
   `;
 
-  const res = await db.prepare(query).bind(userId, now, since, userId, now, limit + 1).all<MessageWithSender>();
+  const res = await db.prepare(query).bind(userId, now, ...cursorParams, userId, now, limit + 1).all<MessageWithSender>();
   const rows = res.results;
   const has_more = rows.length > limit;
   const messages = has_more ? rows.slice(0, limit) : rows;
   const enriched = await enrichMessagesWithMedia(db, messages);
+  const last = enriched.length > 0 ? enriched[enriched.length - 1] : null;
 
   return {
     messages: enriched,
     sync_timestamp: now,
     has_more,
+    next_cursor: last ? { ts: last.created_at, id: last.id } : null,
   };
 }
 
@@ -408,6 +348,130 @@ export async function enrichMessagesWithMedia(
   return messages;
 }
 
+// ---- ACK 批量查询公共工具 -------------------------------------------------
+// D1/SQLite 绑定变量上限保守取 50：所有 IN (...) 批量查询按块拆分，每块绑定参数 ≤50。
+const BIND_CHUNK = 50;
+
+function chunked<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+function placeholders(n: number): string {
+  return new Array(n).fill('?').join(',');
+}
+
+interface AckMessageRow {
+  id: string;
+  conversation_id: string;
+  sender_id: string;
+  retention: 'permanent' | 'on_read';
+  status: string;
+  burn_after_seconds: number | null;
+  created_at: number;
+}
+
+// Phase 1 批量版：一次 IN 查询同时完成“消息存在 + 当前用户是群成员”校验，
+// 结果按 id 建 Map，调用方再按输入顺序回填 acknowledged/skipped（语义与逐条一致）。
+async function fetchAckCandidates(
+  db: D1Database,
+  userId: string,
+  messageIds: string[]
+): Promise<Map<string, AckMessageRow>> {
+  const map = new Map<string, AckMessageRow>();
+  // 每块 1(userId) + 49(ids) = 50 个绑定参数
+  for (const ids of chunked(messageIds, BIND_CHUNK - 1)) {
+    const res = await db.prepare(`
+      SELECT m.id, m.conversation_id, m.sender_id, m.retention, m.status, m.burn_after_seconds, m.created_at
+      FROM messages m
+      JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
+      WHERE m.id IN (${placeholders(ids.length)})
+    `).bind(userId, ...ids).all<AckMessageRow>();
+    for (const row of res.results) {
+      map.set(row.id, row);
+    }
+  }
+  return map;
+}
+
+// Phase 3 批量版：recipientCount = 会话成员总数 - (发送者仍是成员 ? 1 : 0)。
+// 两步 GROUP BY / 行值 IN 批量查询替代原 per-message COUNT：
+//  1) 每个会话成员总数 GROUP BY conversation_id；
+//  2) 批量探测各 (conversation_id, sender_id) 成员关系（SQLite 行值 IN）。
+async function getRecipientCounts(
+  db: D1Database,
+  msgs: AckMessageRow[]
+): Promise<Map<string, number>> {
+  const pairMap = new Map<string, { conversation_id: string; sender_id: string }>();
+  for (const m of msgs) {
+    pairMap.set(`${m.conversation_id} ${m.sender_id}`, m);
+  }
+
+  const convIds = [...new Set(msgs.map((m) => m.conversation_id))];
+  const totals = new Map<string, number>();
+  for (const ids of chunked(convIds, BIND_CHUNK)) {
+    const res = await db.prepare(`
+      SELECT conversation_id, COUNT(*) AS count
+      FROM conversation_members
+      WHERE conversation_id IN (${placeholders(ids.length)})
+      GROUP BY conversation_id
+    `).bind(...ids).all<{ conversation_id: string; count: number }>();
+    for (const r of res.results) {
+      totals.set(r.conversation_id, r.count);
+    }
+  }
+
+  const senderIsMember = new Set<string>();
+  // 每块 25 对 × 2 列 = 50 个绑定参数
+  for (const pairs of chunked([...pairMap.values()], BIND_CHUNK / 2)) {
+    const tuplePh = pairs.map(() => '(?, ?)').join(',');
+    const res = await db.prepare(`
+      SELECT conversation_id, user_id
+      FROM conversation_members
+      WHERE (conversation_id, user_id) IN (${tuplePh})
+    `).bind(...pairs.flatMap((p) => [p.conversation_id, p.sender_id])).all<{ conversation_id: string; user_id: string }>();
+    for (const r of res.results) {
+      senderIsMember.add(`${r.conversation_id} ${r.user_id}`);
+    }
+  }
+
+  const counts = new Map<string, number>();
+  for (const [key, m] of pairMap) {
+    const total = totals.get(m.conversation_id) ?? 0;
+    counts.set(key, senderIsMember.has(key) ? total - 1 : total);
+  }
+  return counts;
+}
+
+// Phase 3 批量版：一次 GROUP BY 同时给出每条消息的 delivered 与 read 去重人数，
+// 替代原 per-message 的 2~3 次 COUNT 聚合。
+async function getReceiptCountsByMessage(
+  db: D1Database,
+  messageIds: string[]
+): Promise<Map<string, { delivered: number; read: number }>> {
+  const counts = new Map<string, { delivered: number; read: number }>();
+  for (const ids of chunked(messageIds, BIND_CHUNK)) {
+    const res = await db.prepare(`
+      SELECT message_id,
+        COUNT(DISTINCT user_id) AS delivered_count,
+        COUNT(DISTINCT CASE WHEN status = 'read' THEN user_id END) AS read_count
+      FROM message_receipts
+      WHERE message_id IN (${placeholders(ids.length)})
+        AND status IN ('delivered', 'read')
+      GROUP BY message_id
+    `).bind(...ids).all<{ message_id: string; delivered_count: number; read_count: number }>();
+    for (const r of res.results) {
+      counts.set(r.message_id, { delivered: r.delivered_count, read: r.read_count });
+    }
+  }
+  return counts;
+}
+
+// 批量投递 ACK（指南 支柱三/写压优化）：读校验与聚合统计均改为 IN (...) 分块批量查询，
+// 回执写入与状态推进各合并为单次 db.batch，N 条消息仅产生 O(N/50) 次 D1 往返。
 export async function acknowledgeDelivery(
   db: D1Database,
   userId: string,
@@ -415,118 +479,61 @@ export async function acknowledgeDelivery(
 ): Promise<{ acknowledged: string[]; skipped: string[] }> {
   const acknowledged: string[] = [];
   const skipped: string[] = [];
-  if (!messageIds || messageIds.length === 0) {
-    return { acknowledged, skipped };
-  }
-
-  const uniqueIds = Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && id.trim())));
-  if (uniqueIds.length === 0) {
-    return { acknowledged, skipped };
-  }
-
   const now = Date.now();
-  const placeholders = uniqueIds.map(() => '?').join(',');
 
-  // 1. Single query: Fetch all messages where current user is a member of the conversation
-  const query = `
-    SELECT m.id, m.conversation_id, m.sender_id, m.status
-    FROM messages m
-    JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
-    WHERE m.id IN (${placeholders})
-  `;
-  const res = await db.prepare(query).bind(userId, ...uniqueIds).all<{
-    id: string;
-    conversation_id: string;
-    sender_id: string;
-    status: string;
-  }>();
-
-  const foundMap = new Map<string, { id: string; conversation_id: string; sender_id: string; status: string }>();
-  for (const m of res.results) {
-    foundMap.set(m.id, m);
-  }
-
-  const validMessages: { id: string; conversation_id: string; sender_id: string; status: string }[] = [];
-  for (const id of uniqueIds) {
-    const msg = foundMap.get(id);
+  // Phase 1: membership + sender validation (batched reads)
+  const candidates = await fetchAckCandidates(db, userId, messageIds);
+  const valid: AckMessageRow[] = [];
+  for (const id of messageIds) {
+    const msg = candidates.get(id);
     if (!msg || msg.sender_id === userId) {
       skipped.push(id);
-    } else {
-      validMessages.push(msg);
-      acknowledged.push(id);
+      continue;
     }
+    valid.push(msg);
+    acknowledged.push(id);
   }
 
-  if (validMessages.length === 0) {
+  if (valid.length === 0) {
     return { acknowledged, skipped };
   }
 
-  // 2. Batch insert 'delivered' receipts for all valid messages
-  const receiptStatements: D1PreparedStatement[] = validMessages.map((m) =>
-    db.prepare(`
-      INSERT OR IGNORE INTO message_receipts (id, message_id, user_id, status, timestamp)
-      VALUES (?, ?, ?, 'delivered', ?)
-    `).bind(crypto.randomUUID(), m.id, userId, now)
+  // Phase 2: single batched write for all receipts (UNIQUE(message_id,user_id,status) 幂等)
+  await db.batch(
+    valid.map((msg) =>
+      db.prepare(`
+        INSERT OR IGNORE INTO message_receipts (id, message_id, user_id, status, timestamp)
+        VALUES (?, ?, ?, 'delivered', ?)
+      `).bind(crypto.randomUUID(), msg.id, userId, now)
+    )
   );
 
-  // 3. Batch fetch conversation members for involved conversations
-  const convIds = Array.from(new Set(validMessages.map((m) => m.conversation_id)));
-  const convPlaceholders = convIds.map(() => '?').join(',');
-  const membersRes = await db.prepare(`
-    SELECT conversation_id, user_id
-    FROM conversation_members
-    WHERE conversation_id IN (${convPlaceholders})
-  `).bind(...convIds).all<{ conversation_id: string; user_id: string }>();
+  // Phase 3: batched aggregate counts (reads), then one batched write for status advancement
+  const recipientCounts = await getRecipientCounts(db, valid);
+  const receiptCounts = await getReceiptCountsByMessage(db, valid.map((m) => m.id));
 
-  const convMembersMap = new Map<string, Set<string>>();
-  for (const row of membersRes.results) {
-    if (!convMembersMap.has(row.conversation_id)) {
-      convMembersMap.set(row.conversation_id, new Set());
-    }
-    convMembersMap.get(row.conversation_id)!.add(row.user_id);
-  }
+  const advancements: D1PreparedStatement[] = [];
+  for (const msg of valid) {
+    const recipientCount = recipientCounts.get(`${msg.conversation_id} ${msg.sender_id}`) ?? 0;
+    const deliveredCount = receiptCounts.get(msg.id)?.delivered ?? 0;
 
-  // Execute the receipt insertions in batch!
-  await db.batch(receiptStatements);
-
-  // 4. Batch query delivered counts for all valid messages
-  const validIds = validMessages.map((m) => m.id);
-  const validPlaceholders = validIds.map(() => '?').join(',');
-  const deliveredCountsRes = await db.prepare(`
-    SELECT message_id, COUNT(DISTINCT user_id) as count
-    FROM message_receipts
-    WHERE message_id IN (${validPlaceholders}) AND status IN ('delivered', 'read')
-    GROUP BY message_id
-  `).bind(...validIds).all<{ message_id: string; count: number }>();
-
-  const deliveredMap = new Map<string, number>();
-  for (const row of deliveredCountsRes.results) {
-    deliveredMap.set(row.message_id, row.count);
-  }
-
-  // 5. Batch transition message status to 'delivered' if all recipients have received it
-  const updateStatements: D1PreparedStatement[] = [];
-  for (const msg of validMessages) {
-    const membersSet = convMembersMap.get(msg.conversation_id);
-    const recipientCount = membersSet ? membersSet.size - (membersSet.has(msg.sender_id) ? 1 : 0) : 0;
-    const deliveredCount = deliveredMap.get(msg.id) ?? 0;
-
+    // Transition message status only when ALL recipients have received it
     if (recipientCount > 0 && deliveredCount >= recipientCount && msg.status === 'pending') {
-      updateStatements.push(
-        db.prepare(`
-          UPDATE messages SET status = 'delivered', delivered_at = ? WHERE id = ?
-        `).bind(now, msg.id)
+      advancements.push(
+        db.prepare(`UPDATE messages SET status = 'delivered', delivered_at = ? WHERE id = ?`).bind(now, msg.id)
       );
     }
   }
-
-  if (updateStatements.length > 0) {
-    await db.batch(updateStatements);
+  if (advancements.length > 0) {
+    await db.batch(advancements);
   }
 
   return { acknowledged, skipped };
 }
 
+// 批量已读 ACK（指南 支柱三/写压优化）：读校验与聚合统计为 IN (...) 分块批量查询，
+// 回执/last_read/状态推进均合并为 db.batch。
+// last_read_message_id 按会话取已读消息中 created_at 最大者（与请求数组顺序无关）。
 export async function acknowledgeRead(
   db: D1Database,
   r2: R2Bucket | undefined,
@@ -537,156 +544,79 @@ export async function acknowledgeRead(
   const burned: string[] = [];
   const skipped: string[] = [];
   const burn_windows: Record<string, number> = {};
-
-  if (!messageIds || messageIds.length === 0) {
-    return { read, burned, skipped, burn_windows };
-  }
-
-  const uniqueIds = Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && id.trim())));
-  if (uniqueIds.length === 0) {
-    return { read, burned, skipped, burn_windows };
-  }
-
   const now = Date.now();
-  const placeholders = uniqueIds.map(() => '?').join(',');
 
-  // 1. Single query: Fetch all messages where current user is a member of the conversation
-  const query = `
-    SELECT m.id, m.conversation_id, m.sender_id, m.retention, m.status, m.burn_after_seconds
-    FROM messages m
-    JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
-    WHERE m.id IN (${placeholders})
-  `;
-  const res = await db.prepare(query).bind(userId, ...uniqueIds).all<{
-    id: string;
-    conversation_id: string;
-    sender_id: string;
-    retention: 'permanent' | 'on_read';
-    status: string;
-    burn_after_seconds: number | null;
-  }>();
+  interface ValidMsg extends AckMessageRow {}
+  const valid: ValidMsg[] = [];
 
-  const foundMap = new Map<string, {
-    id: string;
-    conversation_id: string;
-    sender_id: string;
-    retention: 'permanent' | 'on_read';
-    status: string;
-    burn_after_seconds: number | null;
-  }>();
-  for (const m of res.results) {
-    foundMap.set(m.id, m);
-  }
-
-  const validMessages: {
-    id: string;
-    conversation_id: string;
-    sender_id: string;
-    retention: 'permanent' | 'on_read';
-    status: string;
-    burn_after_seconds: number | null;
-  }[] = [];
-
-  for (const id of uniqueIds) {
-    const msg = foundMap.get(id);
+  // Phase 1: membership + sender validation (batched reads)
+  const candidates = await fetchAckCandidates(db, userId, messageIds);
+  for (const id of messageIds) {
+    const msg = candidates.get(id);
     if (!msg || msg.sender_id === userId) {
       skipped.push(id);
-    } else {
-      validMessages.push(msg);
+      continue;
     }
+    valid.push(msg);
   }
 
-  if (validMessages.length === 0) {
+  if (valid.length === 0) {
     return { read, burned, skipped, burn_windows };
   }
 
-  // 2. Batch update conversation_members.last_read_message_id for each conversation involved
-  const convLastMsgMap = new Map<string, string>();
-  for (const m of validMessages) {
-    convLastMsgMap.set(m.conversation_id, m.id);
+  // Phase 2: batched writes — last_read 游标（每会话一条）+ delivered/read 回执（幂等）
+  const writes: D1PreparedStatement[] = [];
+  const latestByConv = new Map<string, ValidMsg>();
+  for (const msg of valid) {
+    const cur = latestByConv.get(msg.conversation_id);
+    if (!cur || msg.created_at > cur.created_at || (msg.created_at === cur.created_at && msg.id > cur.id)) {
+      latestByConv.set(msg.conversation_id, msg);
+    }
   }
-
-  const initialBatchStmts: D1PreparedStatement[] = [];
-  for (const [convId, lastMsgId] of convLastMsgMap.entries()) {
-    initialBatchStmts.push(
+  for (const [convId, msg] of latestByConv) {
+    writes.push(
       db.prepare(`
         UPDATE conversation_members SET last_read_message_id = ? WHERE conversation_id = ? AND user_id = ?
-      `).bind(lastMsgId, convId, userId)
+      `).bind(msg.id, convId, userId)
     );
   }
-
-  // 3. Batch insert 'delivered' and 'read' receipts
-  for (const m of validMessages) {
-    initialBatchStmts.push(
+  for (const msg of valid) {
+    writes.push(
       db.prepare(`
         INSERT OR IGNORE INTO message_receipts (id, message_id, user_id, status, timestamp)
         VALUES (?, ?, ?, 'delivered', ?)
-      `).bind(crypto.randomUUID(), m.id, userId, now)
-    );
-    initialBatchStmts.push(
+      `).bind(crypto.randomUUID(), msg.id, userId, now),
       db.prepare(`
         INSERT OR IGNORE INTO message_receipts (id, message_id, user_id, status, timestamp)
         VALUES (?, ?, ?, 'read', ?)
-      `).bind(crypto.randomUUID(), m.id, userId, now)
+      `).bind(crypto.randomUUID(), msg.id, userId, now)
     );
   }
+  await db.batch(writes);
 
-  await db.batch(initialBatchStmts);
-
-  // 4. Batch fetch conversation members
-  const convIds = Array.from(new Set(validMessages.map((m) => m.conversation_id)));
-  const convPlaceholders = convIds.map(() => '?').join(',');
-  const membersRes = await db.prepare(`
-    SELECT conversation_id, user_id
-    FROM conversation_members
-    WHERE conversation_id IN (${convPlaceholders})
-  `).bind(...convIds).all<{ conversation_id: string; user_id: string }>();
-
-  const convMembersMap = new Map<string, Set<string>>();
-  for (const row of membersRes.results) {
-    if (!convMembersMap.has(row.conversation_id)) {
-      convMembersMap.set(row.conversation_id, new Set());
-    }
-    convMembersMap.get(row.conversation_id)!.add(row.user_id);
+  // Phase 3: batched aggregate counts (reads), batched status advancement
+  const advancements: D1PreparedStatement[] = [];
+  interface BurnCandidate {
+    msg: ValidMsg;
+    burnWindowMs: number;
   }
+  const burnCandidates: BurnCandidate[] = [];
 
-  // 5. Batch fetch delivered and read counts in a single query
-  const validIds = validMessages.map((m) => m.id);
-  const validPlaceholders = validIds.map(() => '?').join(',');
-  const receiptCountsRes = await db.prepare(`
-    SELECT
-      message_id,
-      COUNT(DISTINCT user_id) AS delivered_count,
-      COUNT(DISTINCT CASE WHEN status = 'read' THEN user_id END) AS read_count
-    FROM message_receipts
-    WHERE message_id IN (${validPlaceholders}) AND status IN ('delivered', 'read')
-    GROUP BY message_id
-  `).bind(...validIds).all<{ message_id: string; delivered_count: number; read_count: number }>();
+  const recipientCounts = await getRecipientCounts(db, valid);
+  const receiptCounts = await getReceiptCountsByMessage(db, valid.map((m) => m.id));
 
-  const countsMap = new Map<string, { delivered_count: number; read_count: number }>();
-  for (const r of receiptCountsRes.results) {
-    countsMap.set(r.message_id, {
-      delivered_count: r.delivered_count,
-      read_count: r.read_count,
-    });
-  }
-
-  // 6. Check status transitions
-  const updateStmts: D1PreparedStatement[] = [];
-  const onReadCandidates: string[] = [];
-
-  for (const msg of validMessages) {
-    const membersSet = convMembersMap.get(msg.conversation_id);
-    const recipientCount = membersSet ? membersSet.size - (membersSet.has(msg.sender_id) ? 1 : 0) : 0;
-    const counts = countsMap.get(msg.id) ?? { delivered_count: 0, read_count: 0 };
-    const deliveredCount = counts.delivered_count;
-    const readCount = counts.read_count;
+  for (const msg of valid) {
+    // Calculate recipient count (all members except sender)
+    const recipientCount = recipientCounts.get(`${msg.conversation_id} ${msg.sender_id}`) ?? 0;
+    const counts = receiptCounts.get(msg.id);
+    const readCount = counts?.read ?? 0;
+    const deliveredCount = counts?.delivered ?? 0;
 
     const allDelivered = recipientCount > 0 && deliveredCount >= recipientCount;
     const allRead = recipientCount > 0 && readCount >= recipientCount;
 
     if (allDelivered && msg.status === 'pending') {
-      updateStmts.push(
+      advancements.push(
         db.prepare(`
           UPDATE messages SET status = 'delivered', delivered_at = COALESCE(delivered_at, ?) WHERE id = ?
         `).bind(now, msg.id)
@@ -694,53 +624,37 @@ export async function acknowledgeRead(
     }
 
     if (msg.retention === 'on_read') {
+      // Burn on read: allow viewing for at least 30s.
+      // Physical destruction delays until all recipients read AND all viewing windows elapse.
       const burnWindowSeconds = msg.burn_after_seconds ?? 30;
       burn_windows[msg.id] = burnWindowSeconds;
       if (allRead) {
-        onReadCandidates.push(msg.id);
+        burnCandidates.push({ msg, burnWindowMs: burnWindowSeconds * 1000 });
       }
       burned.push(msg.id);
     } else {
       if (allRead && msg.status !== 'read') {
-        updateStmts.push(
-          db.prepare(`
-            UPDATE messages SET status = 'read', read_at = ? WHERE id = ?
-          `).bind(now, msg.id)
+        advancements.push(
+          db.prepare(`UPDATE messages SET status = 'read', read_at = ? WHERE id = ?`).bind(now, msg.id)
         );
       }
       read.push(msg.id);
     }
   }
-
-  if (updateStmts.length > 0) {
-    await db.batch(updateStmts);
+  if (advancements.length > 0) {
+    await db.batch(advancements);
   }
 
-  // 7. Check destruction for on_read messages that are allRead
-  if (onReadCandidates.length > 0) {
-    const candidatePlaceholders = onReadCandidates.map(() => '?').join(',');
+  // Phase 4: 物理销毁（全员已读且最晚已读满 burn 窗口；罕见路径，逐条处理）
+  for (const { msg, burnWindowMs } of burnCandidates) {
     const latestReadRes = await db.prepare(`
-      SELECT message_id, MAX(timestamp) as latest_read
+      SELECT MAX(timestamp) as latest_read
       FROM message_receipts
-      WHERE message_id IN (${candidatePlaceholders}) AND status = 'read'
-      GROUP BY message_id
-    `).bind(...onReadCandidates).all<{ message_id: string; latest_read: number | null }>();
-
-    const latestReadMap = new Map<string, number>();
-    for (const r of latestReadRes.results) {
-      if (r.latest_read !== null) {
-        latestReadMap.set(r.message_id, r.latest_read);
-      }
-    }
-
-    for (const id of onReadCandidates) {
-      const msg = foundMap.get(id);
-      const burnWindowSeconds = msg?.burn_after_seconds ?? 30;
-      const burnWindowMs = burnWindowSeconds * 1000;
-      const latestRead = latestReadMap.get(id) ?? now;
-      if (now - latestRead >= burnWindowMs) {
-        await destroyMessage(db, r2, id);
-      }
+      WHERE message_id = ? AND status = 'read'
+    `).bind(msg.id).first<{ latest_read: number | null }>();
+    const latestRead = latestReadRes?.latest_read ?? now;
+    if (now - latestRead >= burnWindowMs) {
+      await destroyMessage(db, r2, msg.id);
     }
   }
 
@@ -878,13 +792,11 @@ export async function recallMessage(
 
   await destroyMediaOnly(db, r2, messageId);
 
-  const updateMsgStmt = db.prepare(
+  await db.prepare(
     "UPDATE messages SET recalled_at = ?, content = '[Message recalled]' WHERE id = ?"
-  ).bind(now, messageId);
+  ).bind(now, messageId).run();
 
-  const updateConvStmt = db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, msg.conversation_id);
-
-  await db.batch([updateMsgStmt, updateConvStmt]);
+  await db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').bind(now, msg.conversation_id).run();
 
   return {
     success: true,

@@ -9,6 +9,7 @@ import {
   setFriendTags,
   getAllFriendTags,
   removeFriend,
+  getFriendRecommendations,
   blockUser,
   getBlockedUsers,
   unblockUser,
@@ -28,6 +29,21 @@ friendRoutes.get('/tags', async (c) => {
     const user = c.get('user');
     const tags = await getAllFriendTags(c.env.DB, user.id);
     return c.json({ tags });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Friend recommendations: users you may know (must be before /:address)
+friendRoutes.get('/recommendations', async (c) => {
+  try {
+    const user = c.get('user');
+    const q = c.req.query('q');
+    const limitRaw = Number(c.req.query('limit'));
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : undefined;
+
+    const recommendations = await getFriendRecommendations(c.env.DB, user.id, { q, limit });
+    return c.json({ recommendations });
   } catch (err: any) {
     return c.json({ error: err.message }, 500);
   }

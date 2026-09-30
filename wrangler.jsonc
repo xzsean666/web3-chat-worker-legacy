@@ -6,18 +6,40 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
+	"workers_dev": true,
+	"vars": {
+		"DIVIDEND_INDEX_ENABLED": "1",
+		"DIVIDEND_RPC_56": "https://bsc.publicnode.com",
+		"DIVIDEND_FACTORY_56": "0xC33bdCB3C4C462A34917653840b481A6B0D8A394",
+		"DIVIDEND_RPC_97": "https://bsc-testnet.publicnode.com",
+		"DIVIDEND_FACTORY_97": "0x187b1cfd8C20DF8781f4882fA859A4294F4F34a6"
+	},
 	"d1_databases": [
 		{
 			"binding": "DB",
 			"database_name": "web3_chat_db",
-			"database_id": "be256d56-fc91-4e57-a57c-a0808238e617",
-			"migrations_dir": "migrations"
+			"database_id": "a1831a68-c87c-4bcd-97e1-19cf80463258",
+			"migrations_dir": "migrations",
+			"remote": true
 		}
 	],
 	"r2_buckets": [
 		{
 			"binding": "VOICE_BUCKET",
 			"bucket_name": "web3-chat-voice"
+		},
+		{
+			"binding": "ENTITLEMENT_BUCKET",
+			"bucket_name": "web3-chat-entitlements"
+		}
+		// ENTITLEMENT_BUCKET（会员/付费扩群权益快照，契约 §2）：独立私有 bucket，
+		// 已于 2026-09-26 创建并启用；代码保留 VOICE_BUCKET + entitlements/ 前缀回退
+		//（见 src/services/payments/storage.ts）。
+	],
+	"routes": [
+		{
+			"pattern": "api.chatnice.top",
+			"custom_domain": true
 		}
 	],
 	"triggers": {
