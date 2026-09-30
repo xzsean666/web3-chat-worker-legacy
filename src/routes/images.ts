@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { authMiddleware } from '../middleware/auth';
 import { uploadImageMessage, getImage, getImageMetadata } from '../services/images';
+import { base64ToUint8Array } from '../utils/base64';
 
 const imageRoutes = new Hono<AppEnv>();
 
@@ -69,12 +70,7 @@ imageRoutes.post('/upload', async (c) => {
         return c.json({ error: 'Missing image_base64 or file' }, 400);
       }
 
-      const binaryStr = atob(json.image_base64);
-      const len = binaryStr.length;
-      imageData = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        imageData[i] = binaryStr.charCodeAt(i);
-      }
+      imageData = base64ToUint8Array(json.image_base64);
     }
 
     if (!conversationId) {

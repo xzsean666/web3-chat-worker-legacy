@@ -30,6 +30,9 @@ import { runStorageLifecycle } from './services/storageLifecycle';
 
 import { withAutoBatch, isAutoBatchD1 } from './db';
 
+import { botRoutes } from './routes/bots';
+import { botOperationsRoutes } from './routes/botOperations';
+
 const app = new Hono<AppEnv>();
 
 app.use('*', cors());
@@ -90,6 +93,9 @@ app.route('/stickers', stickerRoutes);
 app.route('/chat-folders', chatFolderRoutes);
 // 内部管理 API（HMAC 鉴权，契约 §6/§7），注册在 messageRoutes 之前避免被全局 auth 拦截
 app.route('/internal/admin', internalAdminRoutes);
+// Telegram-like Bot routes (用户侧管理与外部 Bot API)
+app.route('/bots', botRoutes);
+app.route('/bot', botOperationsRoutes);
 // 官网下载页与最新安装包下载（公开无 auth），必须在 messageRoutes 之前注册
 app.route('/', webRoutes);
 // 用户侧支付/权益 API（自有 authMiddleware，契约 §6 用户侧）

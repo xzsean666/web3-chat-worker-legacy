@@ -95,13 +95,14 @@ export async function sendMessage(
   const messageId = crypto.randomUUID();
   const content = options.content ? options.content.trim() : null;
 
-  await db.prepare(`
-    INSERT INTO messages (
-      id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds, mentions
-    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-  `).bind(messageId, conversationId, senderId, type, content, retention, expiresAt, now, burnAfterSeconds, mentionsJson).run();
-
-  await db.prepare('UPDATE conversations SET updated_at = ?, last_message_at = ? WHERE id = ?').bind(now, now, conversationId).run();
+  await db.batch([
+    db.prepare(`
+      INSERT INTO messages (
+        id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds, mentions
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+    `).bind(messageId, conversationId, senderId, type, content, retention, expiresAt, now, burnAfterSeconds, mentionsJson),
+    db.prepare('UPDATE conversations SET updated_at = ?, last_message_at = ? WHERE id = ?').bind(now, now, conversationId),
+  ]);
 
   return {
     id: messageId,
@@ -301,34 +302,46 @@ export async function enrichMessagesWithMedia(
   const imageMap = new Map<string, ImageMessageRow>();
   const fileMap = new Map<string, FileMessageRow>();
 
+  const promises: Promise<void>[] = [];
+
   if (voiceMsgIds.length > 0) {
-    const placeholders = voiceMsgIds.map(() => '?').join(',');
-    const voiceRows = await db.prepare(
-      `SELECT * FROM voice_messages WHERE message_id IN (${placeholders})`
-    ).bind(...voiceMsgIds).all<VoiceMessageRow>();
-    for (const v of voiceRows.results) {
-      voiceMap.set(v.message_id, v);
-    }
+    promises.push((async () => {
+      const placeholders = voiceMsgIds.map(() => '?').join(',');
+      const voiceRows = await db.prepare(
+        `SELECT * FROM voice_messages WHERE message_id IN (${placeholders})`
+      ).bind(...voiceMsgIds).all<VoiceMessageRow>();
+      for (const v of voiceRows.results) {
+        voiceMap.set(v.message_id, v);
+      }
+    })());
   }
 
   if (imageMsgIds.length > 0) {
-    const placeholders = imageMsgIds.map(() => '?').join(',');
-    const imageRows = await db.prepare(
-      `SELECT * FROM image_messages WHERE message_id IN (${placeholders})`
-    ).bind(...imageMsgIds).all<ImageMessageRow>();
-    for (const img of imageRows.results) {
-      imageMap.set(img.message_id, img);
-    }
+    promises.push((async () => {
+      const placeholders = imageMsgIds.map(() => '?').join(',');
+      const imageRows = await db.prepare(
+        `SELECT * FROM image_messages WHERE message_id IN (${placeholders})`
+      ).bind(...imageMsgIds).all<ImageMessageRow>();
+      for (const img of imageRows.results) {
+        imageMap.set(img.message_id, img);
+      }
+    })());
   }
 
   if (fileMsgIds.length > 0) {
-    const placeholders = fileMsgIds.map(() => '?').join(',');
-    const fileRows = await db.prepare(
-      `SELECT * FROM file_messages WHERE message_id IN (${placeholders})`
-    ).bind(...fileMsgIds).all<FileMessageRow>();
-    for (const f of fileRows.results) {
-      fileMap.set(f.message_id, f);
-    }
+    promises.push((async () => {
+      const placeholders = fileMsgIds.map(() => '?').join(',');
+      const fileRows = await db.prepare(
+        `SELECT * FROM file_messages WHERE message_id IN (${placeholders})`
+      ).bind(...fileMsgIds).all<FileMessageRow>();
+      for (const f of fileRows.results) {
+        fileMap.set(f.message_id, f);
+      }
+    })());
+  }
+
+  if (promises.length > 0) {
+    await Promise.all(promises);
   }
 
   for (const m of messages) {
@@ -654,7 +667,7 @@ export async function acknowledgeRead(
     `).bind(msg.id).first<{ latest_read: number | null }>();
     const latestRead = latestReadRes?.latest_read ?? now;
     if (now - latestRead >= burnWindowMs) {
-      await destroyMessage(db, r2, msg.id);
+      await destroyMessage(db, r2, msg.id, (msg as any).type);
     }
   }
 

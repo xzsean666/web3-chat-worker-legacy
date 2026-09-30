@@ -122,13 +122,27 @@ export async function countPendingCleanup(db: D1Database, target: StorageLifecyc
 }
 
 async function deleteR2Keys(bucket: R2Bucket | undefined, keys: string[]): Promise<number> {
+  if (!bucket || keys.length === 0) return 0;
   let deleted = 0;
-  for (const key of keys) {
+  const CHUNK_SIZE = 50;
+  for (let i = 0; i < keys.length; i += CHUNK_SIZE) {
+    const chunk = keys.slice(i, i + CHUNK_SIZE);
     try {
-      await bucket?.delete(key);
-      deleted++;
-    } catch (err) {
-      console.error(`storageLifecycle: failed to delete R2 object ${key}:`, err);
+      await bucket.delete(chunk);
+      deleted += chunk.length;
+    } catch {
+      const settled = await Promise.allSettled(
+        chunk.map(async (key) => {
+          await bucket.delete(key);
+        })
+      );
+      for (const res of settled) {
+        if (res.status === 'fulfilled') {
+          deleted++;
+        } else {
+          console.error('storageLifecycle: failed to delete R2 object:', res.reason);
+        }
+      }
     }
   }
   return deleted;

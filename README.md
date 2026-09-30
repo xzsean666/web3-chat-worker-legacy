@@ -53,6 +53,10 @@ High-performance, single-node Cloudflare Worker backend for ephemeral Web3 chat.
    - **Batch ACK (`POST /messages/ack`, `POST /messages/read`)**: Allows batch acknowledgement of message IDs.
 9. **Automated Scheduled Sweeper**:
    - Cloudflare Worker scheduled cron handler runs every minute (`crons = ["* * * * *"]`) to sweep expired messages and orphan voice binaries.
+10. **Telegram-like Bot System & Open API**:
+   - Anyone can register their own bot via `POST /bots` without BotFather complexity.
+   - Bots are system virtual users, enabling native group messaging, direct chats without friendship blocks, and full incremental sync.
+   - Open Bot Operations API (`/bot/*`) authenticated via `bot_id` + `api_key` allows external programs to send messages, kick violators, mute groups/members, and manage announcements. See [`docs/BOT_INTEGRATION_GUIDE.md`](docs/BOT_INTEGRATION_GUIDE.md).
 
 ---
 
@@ -643,6 +647,36 @@ Allowed categories: `harassment`, `fraud`, `account_theft`, `infringement`, `cou
 #### `GET /reports`
 
 List the authenticated user's submitted reports. Optional `?limit=1..100`; response shape is `{ "reports": [...] }`.
+
+---
+
+### 11. Telegram-like Bots (`/bots` & `/bot/*`)
+
+For full details, tutorials, Python/TypeScript SDK examples, and API references, see [`docs/BOT_INTEGRATION_GUIDE.md`](docs/BOT_INTEGRATION_GUIDE.md).
+
+#### Bot Management (User Authenticated)
+- `POST /bots`: Register a new bot (returns `bot_id` and plaintext `api_key`).
+- `GET /bots`: List all bots owned by the caller (masked keys).
+- `GET /bots/:id`: Get bot details.
+- `PATCH /bots/:id`: Update bot profile (name, username, description, avatar_url, status).
+- `POST /bots/:id/reset-key`: Invalidate old API key and issue a new one.
+- `DELETE /bots/:id`: Delete bot and its virtual user.
+
+#### Bot Operations (Open API with `bot_id` + `api_key`)
+Authenticate via `X-Bot-Token: <bot_id>:<api_key>` (or `X-Bot-Id` + `X-Bot-Key`, `Authorization: Bearer <bot_id>:<api_key>`, query parameters, or JSON body).
+- `GET /bot/me`: Inspect bot profile.
+- `GET /bot/groups`: List groups the bot is currently in.
+- `GET /bot/groups/:id`: Get group details and bot role.
+- `GET /bot/groups/:id/members`: List group members.
+- `POST /bot/groups/join`: Join a group via `group_id` or `invite_token`.
+- `POST /bot/messages/send`: Send text or sticker messages (with `@mentions` support).
+- `GET /bot/conversations/:id/messages`: Paginated message history.
+- `GET /bot/sync`: Incremental delta sync for realtime message listening.
+- `POST /bot/groups/:id/kick`: Kick member (requires admin/owner bot role).
+- `POST /bot/groups/:id/mute`: Mute/unmute entire group ("admin始终可以讲话").
+- `POST /bot/groups/:id/mute-member`: Mute/unmute individual member with duration and reason.
+- `PATCH /bot/groups/:id`: Update group name, announcement, or description.
+- `POST /bot/groups/:id/leave`: Leave group.
 
 ---
 

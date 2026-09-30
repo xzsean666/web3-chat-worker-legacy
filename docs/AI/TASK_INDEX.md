@@ -20,5 +20,7 @@
 | [TASK-016](tasks/TASK-016.md) | Social System: Friends List, Friend Tagging & Blacklist Enforcement | TASK-015 | DONE | Friends management, friend tags, blacklist management, 1:1 chat block enforcement, and message mentions |
 | [TASK-017](tasks/TASK-017.md) | Group Metadata, Moderation (Mute System), Owner Kick, Member Leave & Admin Privileges | TASK-016 | DONE | Group metadata (name, intro, top marquee), group/member mute ("admin始终可以讲话"), owner kick, self leave |
 | [TASK-018](tasks/TASK-018.md) | D1 Write Batching & Auto-Batching Engine Optimization | TASK-017 | DONE | D1WriteBatcher, withAutoBatch transparent proxy, RYOW pre-flush, statement chunking, and service batch writes |
+| [TASK-019](tasks/TASK-019.md) | Telegram-like Bot System (Registration, Control & Open API Operations) | TASK-018 | DONE | Bot registration, virtual users, multiple credential auth, messaging, sync, and group administration |
+| [TASK-020](tasks/TASK-020.md) | Comprehensive Performance Optimization (D1, CPU, R2 IO, In-Memory Caches & Auto-Batching) | TASK-019 | DONE | Covering/FK indexes migration, native base64 CPU boost, N+1 fix, D1 batching, isolate cache, R2 concurrency |
 
 

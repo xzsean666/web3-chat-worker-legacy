@@ -87,12 +87,23 @@ export async function sweepExpiredMessages(
             SELECT object_key FROM ${table} WHERE message_id IN (${placeholders})
           `).bind(...ids).all<{ object_key: string }>();
 
-          for (const row of rowsRes.results ?? []) {
+          const keys = (rowsRes.results ?? []).map((r) => r.object_key).filter(Boolean);
+          if (keys.length > 0) {
             try {
-              await r2.delete(row.object_key);
-              onDelete();
-            } catch (err) {
-              console.error(`Failed to delete R2 object ${row.object_key}:`, err);
+              await r2.delete(keys);
+              for (let i = 0; i < keys.length; i++) onDelete();
+            } catch {
+              const settled = await Promise.allSettled(
+                keys.map(async (key) => {
+                  await r2.delete(key);
+                  onDelete();
+                })
+              );
+              for (const res of settled) {
+                if (res.status === 'rejected') {
+                  console.error('cleanup: failed to delete R2 object:', res.reason);
+                }
+              }
             }
           }
         }

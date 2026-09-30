@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { authMiddleware } from '../middleware/auth';
 import { uploadVoiceMessage, getVoiceAudio, getVoiceMetadata } from '../services/voice';
+import { base64ToUint8Array } from '../utils/base64';
 
 const voiceRoutes = new Hono<AppEnv>();
 
@@ -55,12 +56,7 @@ voiceRoutes.post('/upload', async (c) => {
         return c.json({ error: 'Missing audio_base64 or file' }, 400);
       }
 
-      const binaryStr = atob(json.audio_base64);
-      const len = binaryStr.length;
-      audioData = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        audioData[i] = binaryStr.charCodeAt(i);
-      }
+      audioData = base64ToUint8Array(json.audio_base64);
     }
 
     if (!conversationId) {

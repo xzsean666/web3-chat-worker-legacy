@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { authMiddleware } from '../middleware/auth';
 import { uploadFileMessage, getFile, getFileMetadata } from '../services/files';
+import { base64ToUint8Array } from '../utils/base64';
 
 const fileRoutes = new Hono<AppEnv>();
 
@@ -63,12 +64,7 @@ fileRoutes.post('/upload', async (c) => {
         return c.json({ error: 'file_name is required' }, 400);
       }
 
-      const binaryStr = atob(json.file_base64);
-      const len = binaryStr.length;
-      fileData = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        fileData[i] = binaryStr.charCodeAt(i);
-      }
+      fileData = base64ToUint8Array(json.file_base64);
     }
 
     if (!conversationId) {

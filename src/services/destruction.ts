@@ -1,33 +1,32 @@
 export async function destroyMessage(
   db: D1Database,
   r2: R2Bucket | undefined,
-  messageId: string
+  messageId: string,
+  typeHint?: string
 ): Promise<{ deleted: boolean; object_key?: string }> {
-  // Check if voice, image, or file metadata exists
   let objectKey: string | undefined;
 
-  const voice = await db.prepare(
-    'SELECT object_key FROM voice_messages WHERE message_id = ?'
-  ).bind(messageId).first<{ object_key: string }>();
+  let type = typeHint;
+  if (!type) {
+    const msg = await db.prepare('SELECT type FROM messages WHERE id = ?').bind(messageId).first<{ type: string }>();
+    type = msg?.type;
+  }
 
-  if (voice) {
-    objectKey = voice.object_key;
-  } else {
+  if (type === 'voice') {
+    const voice = await db.prepare(
+      'SELECT object_key FROM voice_messages WHERE message_id = ?'
+    ).bind(messageId).first<{ object_key: string }>();
+    if (voice) objectKey = voice.object_key;
+  } else if (type === 'image') {
     const image = await db.prepare(
       'SELECT object_key FROM image_messages WHERE message_id = ?'
     ).bind(messageId).first<{ object_key: string }>();
-
-    if (image) {
-      objectKey = image.object_key;
-    } else {
-      const file = await db.prepare(
-        'SELECT object_key FROM file_messages WHERE message_id = ?'
-      ).bind(messageId).first<{ object_key: string }>();
-
-      if (file) {
-        objectKey = file.object_key;
-      }
-    }
+    if (image) objectKey = image.object_key;
+  } else if (type === 'file') {
+    const file = await db.prepare(
+      'SELECT object_key FROM file_messages WHERE message_id = ?'
+    ).bind(messageId).first<{ object_key: string }>();
+    if (file) objectKey = file.object_key;
   }
 
   if (objectKey && r2) {

@@ -76,20 +76,20 @@ export async function uploadVoiceMessage(
     },
   });
 
-  // 6. Save message and voice metadata in D1
-  await db.prepare(`
-    INSERT INTO messages (
-      id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds
-    ) VALUES (?, ?, ?, 'voice', ?, ?, 'pending', ?, ?, ?)
-  `).bind(messageId, params.conversation_id, senderId, `[Voice: ${duration}s]`, retention, expiresAt, now, burnAfterSeconds).run();
-
-  await db.prepare(`
-    INSERT INTO voice_messages (
-      id, message_id, object_key, duration, mime_type, size, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).bind(voiceId, messageId, objectKey, duration, normalizedMime, byteLength, now).run();
-
-  await db.prepare('UPDATE conversations SET updated_at = ?, last_message_at = ? WHERE id = ?').bind(now, now, params.conversation_id).run();
+  // 6. Save message and voice metadata in D1 (batched into single round-trip)
+  await db.batch([
+    db.prepare(`
+      INSERT INTO messages (
+        id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds
+      ) VALUES (?, ?, ?, 'voice', ?, ?, 'pending', ?, ?, ?)
+    `).bind(messageId, params.conversation_id, senderId, `[Voice: ${duration}s]`, retention, expiresAt, now, burnAfterSeconds),
+    db.prepare(`
+      INSERT INTO voice_messages (
+        id, message_id, object_key, duration, mime_type, size, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).bind(voiceId, messageId, objectKey, duration, normalizedMime, byteLength, now),
+    db.prepare('UPDATE conversations SET updated_at = ?, last_message_at = ? WHERE id = ?').bind(now, now, params.conversation_id),
+  ]);
 
   const message: MessageRow = {
     id: messageId,

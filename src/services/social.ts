@@ -333,7 +333,7 @@ export async function getFriendRecommendations(
   const keyword = options.q?.trim().toLowerCase();
 
   let keywordClause = '';
-  const params: unknown[] = [user, user, user, user, user];
+  const params: unknown[] = [user, user, user, user, user, user];
   if (keyword) {
     keywordClause = `AND (lower(u.id) LIKE ? OR lower(COALESCE(u.username, '')) LIKE ? OR lower(COALESCE(u.public_metadata, '')) LIKE ?)`;
     const like = `%${keyword}%`;
@@ -343,25 +343,30 @@ export async function getFriendRecommendations(
 
   // Rank users who share group conversations with me first ("people you may know"),
   // excluding myself, existing friends, and blacklist in both directions.
+  // Uses a CTE to calculate shared groups ONLY for co-members instead of evaluating correlated subqueries across all users.
   const rowsRes = await db.prepare(`
+    WITH my_groups AS (
+      SELECT DISTINCT cm.conversation_id
+      FROM conversation_members cm
+      JOIN conversations c ON c.id = cm.conversation_id AND c.type IN ('group', 'club')
+      WHERE cm.user_id = ?
+    ),
+    shared AS (
+      SELECT cm.user_id, COUNT(DISTINCT cm.conversation_id) AS shared_count
+      FROM conversation_members cm
+      JOIN my_groups mg ON mg.conversation_id = cm.conversation_id
+      WHERE cm.user_id != ?
+      GROUP BY cm.user_id
+    )
     SELECT
       u.id AS address,
       u.username,
       u.public_metadata,
       u.avatar_key,
       u.avatar_updated_at,
-      (
-        SELECT COUNT(DISTINCT cm_theirs.conversation_id)
-        FROM conversation_members cm_theirs
-        JOIN conversation_members cm_mine
-          ON cm_mine.conversation_id = cm_theirs.conversation_id
-         AND cm_mine.user_id = ?
-        JOIN conversations conv
-          ON conv.id = cm_theirs.conversation_id
-         AND conv.type IN ('group', 'club')
-        WHERE cm_theirs.user_id = u.id
-      ) AS shared_groups
+      COALESCE(s.shared_count, 0) AS shared_groups
     FROM users u
+    LEFT JOIN shared s ON s.user_id = u.id
     WHERE u.id != ?
       AND u.id NOT IN (SELECT friend_address FROM friends WHERE user_id = ?)
       AND u.id NOT IN (SELECT blocked_address FROM blacklist WHERE user_id = ?)

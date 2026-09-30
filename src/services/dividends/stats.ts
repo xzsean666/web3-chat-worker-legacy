@@ -18,14 +18,20 @@ const DEFAULT_HYPERLIQUID_API = 'https://api.hyperliquid.xyz/info';
 
 export type PriceMap = Record<string, number>;
 
+let inMemoryPrices: { prices: PriceMap; updatedAt: number } | null = null;
+
 export async function getPrices(env: Env): Promise<{ prices: PriceMap; updatedAt: number }> {
+  const now = Date.now();
+  if (inMemoryPrices && now - inMemoryPrices.updatedAt < PRICE_TTL_MS) {
+    return inMemoryPrices;
+  }
   const cached = await env.DB.prepare('SELECT value, updated_at FROM idx_kv WHERE key = ?')
     .bind(PRICE_KV_KEY)
     .first<{ value: string; updated_at: number }>();
-  const now = Date.now();
   if (cached && now - cached.updated_at < PRICE_TTL_MS) {
     try {
-      return { prices: JSON.parse(cached.value) as PriceMap, updatedAt: cached.updated_at };
+      inMemoryPrices = { prices: JSON.parse(cached.value) as PriceMap, updatedAt: cached.updated_at };
+      return inMemoryPrices;
     } catch {
       // fall through to refetch
     }
@@ -36,6 +42,7 @@ export async function getPrices(env: Env): Promise<{ prices: PriceMap; updatedAt
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ type: 'allMids' }),
+      signal: AbortSignal.timeout(1500),
     });
     if (!resp.ok) throw new Error(`price api ${resp.status}`);
     const data = (await resp.json()) as Record<string, string>;
@@ -51,14 +58,16 @@ export async function getPrices(env: Env): Promise<{ prices: PriceMap; updatedAt
       )
         .bind(PRICE_KV_KEY, JSON.stringify(prices), now)
         .run();
-      return { prices, updatedAt: now };
+      inMemoryPrices = { prices, updatedAt: now };
+      return inMemoryPrices;
     }
   } catch (err) {
     console.warn('dividend stats: price fetch failed', err);
   }
   if (cached) {
     try {
-      return { prices: JSON.parse(cached.value) as PriceMap, updatedAt: cached.updated_at };
+      inMemoryPrices = { prices: JSON.parse(cached.value) as PriceMap, updatedAt: cached.updated_at };
+      return inMemoryPrices;
     } catch {
       // ignore
     }
@@ -98,6 +107,30 @@ function tvlUsdOf(row: IdxPairRow, metas: Map<string, TokenMeta>, prices: PriceM
   return (u0 ?? 0) + (u1 ?? 0);
 }
 
+function feeUsdFromRows(
+  rows: Pick<IdxFeeDailyRow, 'day_index' | 'token_address' | 'fee_amount'>[],
+  fromDay: number,
+  toDay: number,
+  metas: Map<string, TokenMeta>,
+  prices: PriceMap
+): { usd: number; priced: boolean; daysWithFees: number } {
+  let usd = 0;
+  let priced = false;
+  const days = new Set<number>();
+  for (const row of rows) {
+    if (row.day_index < fromDay || row.day_index > toDay) continue;
+    const meta = metas.get(row.token_address) ?? UNKNOWN_META;
+    const part = usdOf(row.fee_amount, meta, prices);
+    if (part === null) continue;
+    if (part > 0) {
+      usd += part;
+      priced = true;
+      days.add(row.day_index);
+    }
+  }
+  return { usd, priced, daysWithFees: days.size };
+}
+
 /** Sum indexed fee USD for a pool over [fromDay, toDay] (UTC day indexes). */
 async function feeUsdInWindow(
   db: D1Database,
@@ -115,20 +148,7 @@ async function feeUsdInWindow(
     )
     .bind(chainId, rewardContract, fromDay, toDay)
     .all<Pick<IdxFeeDailyRow, 'day_index' | 'token_address' | 'fee_amount'>>();
-  let usd = 0;
-  let priced = false;
-  const days = new Set<number>();
-  for (const row of res.results ?? []) {
-    const meta = metas.get(row.token_address) ?? UNKNOWN_META;
-    const part = usdOf(row.fee_amount, meta, prices);
-    if (part === null) continue;
-    if (part > 0) {
-      usd += part;
-      priced = true;
-      days.add(row.day_index);
-    }
-  }
-  return { usd, priced, daysWithFees: days.size };
+  return feeUsdFromRows(res.results ?? [], fromDay, toDay, metas, prices);
 }
 
 export interface PairStatsPayload {
@@ -156,7 +176,8 @@ async function buildPairPayload(
   row: IdxPairRow,
   metas: Map<string, TokenMeta>,
   prices: PriceMap,
-  today: number
+  today: number,
+  prefetchedFeeRows?: Pick<IdxFeeDailyRow, 'day_index' | 'token_address' | 'fee_amount'>[]
 ): Promise<PairStatsPayload> {
   const m0 = metas.get(row.token0 ?? '') ?? UNKNOWN_META;
   const m1 = metas.get(row.token1 ?? '') ?? UNKNOWN_META;
@@ -165,8 +186,12 @@ async function buildPairPayload(
   const fees0 = usdOf(row.total_fees0, m0, prices);
   const fees1 = usdOf(row.total_fees1, m1, prices);
   const tvlUsd = tvlUsdOf(row, metas, prices);
-  const fee7 = await feeUsdInWindow(db, row.chain_id, row.reward_contract!, today - 6, today, metas, prices);
-  const fee30 = await feeUsdInWindow(db, row.chain_id, row.reward_contract!, today - 29, today, metas, prices);
+  const fee7 = prefetchedFeeRows
+    ? feeUsdFromRows(prefetchedFeeRows, today - 6, today, metas, prices)
+    : await feeUsdInWindow(db, row.chain_id, row.reward_contract!, today - 6, today, metas, prices);
+  const fee30 = prefetchedFeeRows
+    ? feeUsdFromRows(prefetchedFeeRows, today - 29, today, metas, prices)
+    : await feeUsdInWindow(db, row.chain_id, row.reward_contract!, today - 29, today, metas, prices);
   return {
     pairAddress: row.pair_address,
     rewardContract: row.reward_contract!,
@@ -275,9 +300,29 @@ export async function listDividendPairs(
     .bind(chainId)
     .all<IdxPairRow>();
   const today = dayIndexOf(Math.floor(Date.now() / 1000));
+
+  // Batch prefetch all 30-day fee rows across all pools in a single query
+  const allFeeRows = await env.DB.prepare(
+    `SELECT reward_contract, day_index, token_address, fee_amount FROM idx_fee_daily
+     WHERE chain_id = ? AND day_index >= ?`
+  )
+    .bind(chainId, today - 29)
+    .all<Pick<IdxFeeDailyRow, 'reward_contract' | 'day_index' | 'token_address' | 'fee_amount'>>();
+
+  const feesByContract = new Map<string, Pick<IdxFeeDailyRow, 'day_index' | 'token_address' | 'fee_amount'>[]>();
+  for (const f of allFeeRows.results ?? []) {
+    let list = feesByContract.get(f.reward_contract);
+    if (!list) {
+      list = [];
+      feesByContract.set(f.reward_contract, list);
+    }
+    list.push(f);
+  }
+
   const pairs: PairStatsPayload[] = [];
   for (const row of rows.results ?? []) {
-    pairs.push(await buildPairPayload(env.DB, row, metas, prices, today));
+    const feeRows = row.reward_contract ? (feesByContract.get(row.reward_contract) ?? []) : [];
+    pairs.push(await buildPairPayload(env.DB, row, metas, prices, today, feeRows));
   }
   return { pairs, pricesUpdatedAt: updatedAt };
 }

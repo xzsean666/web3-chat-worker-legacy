@@ -4,7 +4,7 @@
 Build a high-performance, single-node Cloudflare Worker Web3 Chat MVP supporting EVM wallet signature login, direct/group chat, text and voice messaging, explicit delivery ACK, burn-on-read, voice destruction (R2), and incremental sync.
 
 ## Current Task
-TASK-018: D1 Write Batching & Auto-Batching Engine Optimization
+TASK-019: Telegram-like Bot System (Registration, Control & Open API Operations)
 
 ## Current Status
 DONE
@@ -108,26 +108,54 @@ DONE
 - TASK-018: Mounted Auto-Batch middleware in `src/index.ts` to automatically coalesce discrete mutations per request/isolate and flush on request completion.
 - TASK-018: Optimized multi-statement writes in `auth.ts`, `conversations.ts`, and `friendRequests.ts` to atomic `db.batch([stmt1, stmt2, ...])`.
 - TASK-018: Created `test/batcher.test.ts` (16 unit tests) and verified entire test suite (44/44 test files, 365/365 tests passing).
+- TASK-019: Created `migrations/0025_bots.sql` adding `bots` table with indices on `owner_id`, `username`, and `api_key_hash`.
+- TASK-019: Updated `src/db/schema.ts` and `src/types.ts` with `BotRow` and `bot?: BotRow` context variables.
+- TASK-019: Implemented `src/services/bots.ts` providing bot creation, virtual user synchronization, key hashing, list/get/update/reset-key/delete, and group membership helpers.
+- TASK-019: Implemented `src/middleware/botAuth.ts` supporting 5 authentication strategies (`X-Bot-Id` + `X-Bot-Key`, `X-Bot-Token`, `Authorization: Bearer`, URL query, and JSON body).
+- TASK-019: Implemented `src/routes/bots.ts` (user bot management) and `src/routes/botOperations.ts` (external bot OpenAPI endpoints).
+- TASK-019: Updated `src/services/conversations.ts` to support username lookup in `findOrCreateUser` and exempt bot direct chats from mutual friendship constraints.
+- TASK-019: Created `test/bots.test.ts` (24 comprehensive tests passing) covering registration, 5 auth strategies, group integration, kick/mute group administration, 1:1 chat, dual-bot interaction, stickers/@mentions, concurrent burst messaging via Auto-Batch, and lifecycle states.
+- TASK-019: Created `docs/BOT_INTEGRATION_GUIDE.md` complete guide with Node.js/TypeScript and Python SDK examples, cURL reference, and architecture/FAQ.
+- TASK-020: Comprehensive Performance Optimization (D1, CPU, R2 IO, In-Memory Caches & Auto-Batching):
+  - Created `migrations/0026_perf_optimization_indexes.sql` adding 19 missing covering, foreign key, and lifecycle indexes to eliminate full table scans across D1.
+  - Implemented `src/utils/base64.ts` leveraging native V8 `Buffer.from(base64, 'base64')` to accelerate Base64 media upload parsing across files, images, voice, users, and groups.
+  - Eliminated N+1 query pattern in `src/services/dividends/stats.ts`, reducing pool fee queries from 1+2N to 2 queries, added timeout and price caching.
+  - Optimized message destruction in `src/services/destruction.ts` to skip media table queries for non-media messages via `typeHint`.
+  - Guarded Auto-Batcher in `src/db/batcher.ts` with chunking for large batches.
+  - Optimized social recommendation query in `src/services/social.ts` by replacing correlated subquery with a CTE.
+  - Merged conversation and membership permission checks in `src/services/conversations.ts` into a single LEFT JOIN.
+  - Added isolate-level in-memory caches for sessions (`src/services/auth.ts`) and active payment config with root DB unwrapping (`src/services/payments/config.ts`).
+  - Optimized R2 deletions with bulk array deletion and `Promise.allSettled` concurrency in `src/services/storageLifecycle.ts` and `src/services/cleanup.ts`.
+  - Converted multi-step media uploads and text message sends to atomic `db.batch` writes (`src/services/images.ts`, `src/services/voice.ts`, `src/services/files.ts`, `src/services/messages.ts`).
+  - Parallelized media enrichment queries in `src/services/messages.ts` with `Promise.all`.
 
 ## Modified Files
-- `src/db/chunker.ts` (new)
-- `src/db/batcher.ts` (new)
-- `src/db/index.ts`
-- `src/index.ts`
+- `migrations/0026_perf_optimization_indexes.sql` (new)
+- `src/utils/base64.ts` (new)
+- `src/db/batcher.ts`
+- `src/routes/files.ts`
+- `src/routes/groups.ts`
+- `src/routes/images.ts`
+- `src/routes/users.ts`
+- `src/routes/voice.ts`
 - `src/services/auth.ts`
+- `src/services/cleanup.ts`
 - `src/services/conversations.ts`
-- `src/services/friendRequests.ts`
-- `test/batcher.test.ts` (new)
-- `test/helpers/db.ts`
-- `test/internal_admin.test.ts`
-- `docs/DATABASE_BATCHING_RULES.md` (new)
-- `docs/AI/tasks/TASK-018.md`
-- `docs/AI/TASK_INDEX.md`
+- `src/services/destruction.ts`
+- `src/services/dividends/stats.ts`
+- `src/services/files.ts`
+- `src/services/images.ts`
+- `src/services/messages.ts`
+- `src/services/payments/config.ts`
+- `src/services/social.ts`
+- `src/services/storageLifecycle.ts`
+- `src/services/users.ts`
+- `src/services/voice.ts`
 - `docs/AI/SESSION_STATE.md`
 
 ## Verification Commands & Results
 - `pnpm run typecheck`: Success (zero type errors across all source and test files).
-- `pnpm test`: Success (44/44 test files passing, 367/367 tests passing with 100% pass rate).
+- `pnpm test`: Success (45/45 test files passing, 391/391 tests passing with 100% pass rate).
 
 ## Unresolved Issues
 None.

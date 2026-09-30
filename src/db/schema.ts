@@ -481,3 +481,21 @@ export interface RateLimitRow {
   bucket: string;
   count: number;
 }
+
+// ---------------------------------------------------------------------------
+// Telegram-like Bots (migration 0025)
+// ---------------------------------------------------------------------------
+
+export interface BotRow {
+  id: string;
+  owner_id: string;
+  name: string;
+  username: string | null;
+  description: string | null;
+  api_key_hash: string;
+  api_key_prefix: string;
+  avatar_url: string | null;
+  status: 'active' | 'disabled';
+  created_at: number;
+  updated_at: number;
+}

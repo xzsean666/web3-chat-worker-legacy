@@ -88,20 +88,20 @@ export async function uploadImageMessage(
     },
   });
 
-  // 5. Save message and image metadata in D1
-  await db.prepare(`
-    INSERT INTO messages (
-      id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds
-    ) VALUES (?, ?, ?, 'image', ?, ?, 'pending', ?, ?, ?)
-  `).bind(messageId, params.conversation_id, senderId, content, retention, expiresAt, now, burnAfterSeconds).run();
-
-  await db.prepare(`
-    INSERT INTO image_messages (
-      id, message_id, object_key, file_name, mime_type, size, width, height, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(imageId, messageId, objectKey, fileName, normalizedMime, byteLength, width, height, now).run();
-
-  await db.prepare('UPDATE conversations SET updated_at = ?, last_message_at = ? WHERE id = ?').bind(now, now, params.conversation_id).run();
+  // 5. Save message and image metadata in D1 (batched into single round-trip)
+  await db.batch([
+    db.prepare(`
+      INSERT INTO messages (
+        id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds
+      ) VALUES (?, ?, ?, 'image', ?, ?, 'pending', ?, ?, ?)
+    `).bind(messageId, params.conversation_id, senderId, content, retention, expiresAt, now, burnAfterSeconds),
+    db.prepare(`
+      INSERT INTO image_messages (
+        id, message_id, object_key, file_name, mime_type, size, width, height, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(imageId, messageId, objectKey, fileName, normalizedMime, byteLength, width, height, now),
+    db.prepare('UPDATE conversations SET updated_at = ?, last_message_at = ? WHERE id = ?').bind(now, now, params.conversation_id),
+  ]);
 
   const message: MessageRow = {
     id: messageId,

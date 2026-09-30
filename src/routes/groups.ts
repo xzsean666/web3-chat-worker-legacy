@@ -4,6 +4,7 @@ import { authMiddleware } from '../middleware/auth';
 import { isGroupLike } from '../db/schema';
 import { GroupCapacityError, capacityErrorResult } from '../services/payments/capacity';
 import { HoldingsGateError, JoinGateConfigError } from '../services/clubs';
+import { base64ToUint8Array } from '../utils/base64';
 import {
   createGroup,
   updateGroup,
@@ -606,16 +607,12 @@ groupRoutes.post('/:id/avatar', async (c) => {
       avatarData = new Uint8Array(arrayBuf);
     } else {
       const json = await c.req.json().catch(() => ({}));
-      if (!json.avatar_base64 && !json.file_base64 && !json.image_base64) {
+      const base64Str = json.avatar_base64 || json.file_base64 || json.image_base64;
+      if (!base64Str) {
         return c.json({ error: 'Missing avatar_base64 or file' }, 400);
       }
-      const base64Str = json.avatar_base64 || json.file_base64 || json.image_base64;
       mimeType = json.mime_type || 'image/png';
-      const binaryString = atob(base64Str);
-      avatarData = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        avatarData[i] = binaryString.charCodeAt(i);
-      }
+      avatarData = base64ToUint8Array(base64Str);
     }
 
     const result = await uploadGroupAvatar(c.env.DB, c.env.VOICE_BUCKET, groupId, user.id, {

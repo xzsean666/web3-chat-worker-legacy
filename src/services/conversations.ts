@@ -364,8 +364,8 @@ export async function findOrCreateUser(db: D1Database, identifier: string): Prom
   }
 
   const user = await db.prepare(
-    'SELECT * FROM users WHERE id = ? OR wallet_address = ?'
-  ).bind(identifier, identifier).first<UserRow>();
+    'SELECT * FROM users WHERE id = ? OR wallet_address = ? OR username = ?'
+  ).bind(identifier, identifier, identifier).first<UserRow>();
 
   if (!user) {
     throw new Error(`Target user not found: ${identifier}`);
@@ -1666,21 +1666,51 @@ export async function assertCanSendMessage(
   conversationId: string,
   senderId: string
 ): Promise<ConversationMemberRow> {
-  const membership = await db.prepare(
-    'SELECT * FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
-  ).bind(conversationId, senderId).first<ConversationMemberRow>();
+  interface ConvAndMemberRow extends ConversationMemberRow {
+    conv_id: string;
+    conv_type: string;
+    conv_is_muted: number;
+    conv_mute_until: number | null;
+  }
 
-  if (!membership) {
+  const row = await db.prepare(`
+    SELECT
+      cm.id, cm.conversation_id, cm.user_id, cm.role, cm.joined_at, cm.last_read_message_id, cm.muted_until, cm.mute_reason, cm.group_nickname,
+      c.id AS conv_id,
+      c.type AS conv_type,
+      c.is_muted AS conv_is_muted,
+      c.mute_until AS conv_mute_until
+    FROM conversations c
+    LEFT JOIN conversation_members cm ON cm.conversation_id = c.id AND cm.user_id = ?
+    WHERE c.id = ?
+  `).bind(senderId, conversationId).first<ConvAndMemberRow>();
+
+  if (!row) {
+    throw new Error('Conversation not found');
+  }
+
+  if (!row.id) {
     throw new Error('Unauthorized: you are not a member of this conversation');
   }
 
-  const conv = await db.prepare(
-    'SELECT id, type, is_muted, mute_until FROM conversations WHERE id = ?'
-  ).bind(conversationId).first<ConversationRow>();
+  const membership: ConversationMemberRow = {
+    id: row.id,
+    conversation_id: row.conversation_id,
+    user_id: row.user_id,
+    role: row.role,
+    joined_at: row.joined_at,
+    last_read_message_id: row.last_read_message_id,
+    muted_until: row.muted_until,
+    mute_reason: row.mute_reason,
+    group_nickname: row.group_nickname,
+  };
 
-  if (!conv) {
-    throw new Error('Conversation not found');
-  }
+  const conv = {
+    id: row.conv_id,
+    type: row.conv_type,
+    is_muted: row.conv_is_muted,
+    mute_until: row.conv_mute_until,
+  };
 
   // Direct chat blacklist check
   if (conv.type === 'direct') {
@@ -1689,23 +1719,25 @@ export async function assertCanSendMessage(
     ).bind(conversationId, senderId).first<{ user_id: string }>();
 
     if (otherMember) {
-      const isBlocked = await db.prepare(
-        'SELECT 1 FROM blacklist WHERE user_id = ? AND blocked_address = ?'
-      ).bind(otherMember.user_id, senderId).first();
+      const check = await db.prepare(
+        `SELECT
+          (SELECT 1 FROM blacklist WHERE user_id = ? AND blocked_address = ?) AS is_blocked,
+          (SELECT 1 FROM bots WHERE id IN (?, ?) LIMIT 1) AS is_bot,
+          (SELECT COUNT(*) FROM friends
+           WHERE (user_id = ? AND friend_address = ?)
+              OR (user_id = ? AND friend_address = ?)) AS friend_count`
+      ).bind(
+        otherMember.user_id, senderId,
+        senderId, otherMember.user_id,
+        senderId, otherMember.user_id, otherMember.user_id, senderId
+      ).first<{ is_blocked: number | null; is_bot: number | null; friend_count: number }>();
 
-      if (isBlocked) {
+      if (check?.is_blocked) {
         throw new Error('Cannot send message: you have been blocked by this user');
       }
 
-      // Direct chats require mutual friendship: once either side deletes the
-      // friend, neither side can send messages until both re-add each other.
-      const friendship = await db.prepare(
-        `SELECT COUNT(*) AS count FROM friends
-         WHERE (user_id = ? AND friend_address = ?)
-            OR (user_id = ? AND friend_address = ?)`
-      ).bind(senderId, otherMember.user_id, otherMember.user_id, senderId).first<{ count: number }>();
-
-      if ((friendship?.count ?? 0) < 2) {
+      // Direct chats require mutual friendship, unless one participant is a bot
+      if (!check?.is_bot && (check?.friend_count ?? 0) < 2) {
         throw new Error('Unauthorized: you are no longer friends with this user');
       }
     }

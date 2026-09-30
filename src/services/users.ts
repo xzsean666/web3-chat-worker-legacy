@@ -1,4 +1,5 @@
 import type { UserRow } from '../db/schema';
+import { invalidateSessionCache } from './auth';
 
 export const ALLOWED_AVATAR_MIME_TYPES: Record<string, string> = {
   'image/jpeg': 'jpg',
@@ -140,6 +141,7 @@ export async function setUsername(
     throw new Error('User not found');
   }
 
+  invalidateSessionCache(undefined, normalized);
   return getMyProfile(db, normalized);
 }
 
@@ -232,6 +234,7 @@ export async function updateUserMetadata(
     WHERE id = ? OR wallet_address = ?
   `).bind(publicMetadataStr, privateMetadataStr, now, normalized, normalized).run();
 
+  invalidateSessionCache(undefined, normalized);
   return getMyProfile(db, normalized);
 }
 
@@ -294,6 +297,7 @@ export async function uploadUserAvatar(
     WHERE id = ? OR wallet_address = ?
   `).bind(objectKey, normalizedMime, now, now, normalized, normalized).run();
 
+  invalidateSessionCache(undefined, normalized);
   return {
     avatar_url: `/users/${normalized}/avatar`,
     avatar_updated_at: now,

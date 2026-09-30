@@ -335,7 +335,16 @@ export function withAutoBatch(
         await batcher.flush();
       }
       const unwrapped = statements.map(unwrapStatement);
-      return rawDb.batch<T>(unwrapped);
+      if (unwrapped.length <= D1_SAFE_BATCH_CHUNK) {
+        return rawDb.batch<T>(unwrapped);
+      }
+      const chunks = chunkArray(unwrapped, D1_SAFE_BATCH_CHUNK);
+      const allResults: D1Result<T>[] = [];
+      for (const chunk of chunks) {
+        const chunkResults = await rawDb.batch<T>(chunk);
+        allResults.push(...chunkResults);
+      }
+      return allResults;
     },
 
     async exec(query: string): Promise<D1ExecResult> {

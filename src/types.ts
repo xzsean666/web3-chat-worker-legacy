@@ -1,4 +1,4 @@
-import type { UserRow, SessionRow, FriendRow, BlacklistRow } from './db/schema';
+import type { UserRow, SessionRow, FriendRow, BlacklistRow, BotRow } from './db/schema';
 
 export interface Env {
   DB: D1Database;
@@ -22,6 +22,7 @@ export type User = UserRow;
 export type Session = SessionRow;
 export type Friend = FriendRow;
 export type Blacklist = BlacklistRow;
+export type Bot = BotRow;
 
 export type MemberRole = 'owner' | 'admin' | 'member';
 export type MessageType = 'text' | 'voice' | 'image' | 'file' | 'system' | 'sticker';
@@ -37,6 +38,7 @@ export type AppVariables = {
   user: UserRow;
   session: SessionRow;
   token: string;
+  bot?: BotRow;
 };
 
 export interface AppEnv {

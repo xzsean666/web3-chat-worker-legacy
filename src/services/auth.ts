@@ -147,6 +147,33 @@ export async function verifySignatureAndLogin(
   };
 }
 
+interface CachedSessionEntry {
+  data: { user: UserRow; session: SessionRow };
+  cachedUntil: number;
+}
+
+const sessionCache = new Map<string, CachedSessionEntry>();
+const SESSION_CACHE_TTL_MS = 15_000; // 15s isolate memory cache
+const MAX_SESSION_CACHE_SIZE = 1000;
+
+export function invalidateSessionCache(tokenHashOrToken?: string, userId?: string): void {
+  if (!tokenHashOrToken && !userId) {
+    sessionCache.clear();
+    return;
+  }
+  if (tokenHashOrToken) {
+    sessionCache.delete(tokenHashOrToken);
+  }
+  if (userId) {
+    const target = userId.toLowerCase();
+    for (const [key, entry] of sessionCache.entries()) {
+      if (entry.data.user.id.toLowerCase() === target || entry.data.user.wallet_address.toLowerCase() === target) {
+        sessionCache.delete(key);
+      }
+    }
+  }
+}
+
 export async function validateSession(
   db: D1Database,
   rawToken: string
@@ -155,6 +182,11 @@ export async function validateSession(
 
   const tokenHash = await hashToken(rawToken);
   const now = Date.now();
+
+  const cached = sessionCache.get(tokenHash);
+  if (cached && cached.cachedUntil > now && cached.data.session.expires_at > now) {
+    return cached.data;
+  }
 
   const row = await db.prepare(`
     SELECT
@@ -194,7 +226,7 @@ export async function validateSession(
 
   if (!row) return null;
 
-  return {
+  const result = {
     session: {
       id: row.session_id,
       user_id: row.wallet_address,
@@ -215,10 +247,22 @@ export async function validateSession(
       updated_at: row.user_updated_at,
     },
   };
+
+  if (sessionCache.size >= MAX_SESSION_CACHE_SIZE) {
+    const oldestKey = sessionCache.keys().next().value;
+    if (oldestKey) sessionCache.delete(oldestKey);
+  }
+  sessionCache.set(tokenHash, {
+    data: result,
+    cachedUntil: Math.min(now + SESSION_CACHE_TTL_MS, row.session_expires_at),
+  });
+
+  return result;
 }
 
 export async function revokeSession(db: D1Database, rawToken: string): Promise<boolean> {
   const tokenHash = await hashToken(rawToken);
+  sessionCache.delete(tokenHash);
   const res = await db.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(tokenHash).run();
   return (res.meta.changes ?? 0) > 0;
 }

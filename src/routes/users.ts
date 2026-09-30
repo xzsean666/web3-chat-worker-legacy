@@ -11,6 +11,7 @@ import {
   getUserByUsername,
   checkUsernameAvailability,
 } from '../services/users';
+import { base64ToUint8Array } from '../utils/base64';
 
 const userRoutes = new Hono<AppEnv>();
 
@@ -65,11 +66,7 @@ userRoutes.post('/me/avatar', async (c) => {
       }
       const base64Str = json.avatar_base64 || json.file_base64 || json.image_base64;
       mimeType = json.mime_type || 'image/png';
-      const binaryString = atob(base64Str);
-      avatarData = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        avatarData[i] = binaryString.charCodeAt(i);
-      }
+      avatarData = base64ToUint8Array(base64Str);
     }
 
     const result = await uploadUserAvatar(c.env.DB, c.env.VOICE_BUCKET, user.id, {

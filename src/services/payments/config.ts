@@ -387,12 +387,39 @@ export const WHITELIST_MEMBERSHIP = {
   active: true,
 } as const;
 
+let activeConfigCache = new WeakMap<object, { config: ActiveConfig; expiresAt: number }>();
+const ACTIVE_CONFIG_TTL_MS = 20_000; // 20s in-memory cache
+
+function getUnderlyingDb(db: D1Database): object {
+  let curr: any = db;
+  while (curr && curr.rawDb) {
+    curr = curr.rawDb;
+  }
+  return curr ?? (db as object);
+}
+
+export function invalidateActiveConfigCache(db?: D1Database): void {
+  if (db) {
+    activeConfigCache.delete(getUnderlyingDb(db));
+  } else {
+    activeConfigCache = new WeakMap<object, { config: ActiveConfig; expiresAt: number }>();
+  }
+}
+
 export async function getActiveConfig(db: D1Database): Promise<ActiveConfig | null> {
+  const now = Date.now();
+  const dbKey = getUnderlyingDb(db);
+  const cached = activeConfigCache.get(dbKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.config;
+  }
   const row = await db
     .prepare('SELECT * FROM payment_config_versions WHERE is_active = 1 ORDER BY version DESC LIMIT 1')
     .first<PaymentConfigVersionRow>();
   if (!row) return null;
-  return { version: row.version, payload: JSON.parse(row.payload_json) as PaymentConfigPayload };
+  const config = { version: row.version, payload: JSON.parse(row.payload_json) as PaymentConfigPayload };
+  activeConfigCache.set(dbKey, { config, expiresAt: now + ACTIVE_CONFIG_TTL_MS });
+  return config;
 }
 
 // 验款/发放必须使用订单冻结的 config_version，不用当前 active 配置（契约 §5）
@@ -465,6 +492,7 @@ export async function saveConfig(
       )
       .bind(version, JSON.stringify(normalized), changeSummary, createdBy, now),
   ]);
+  invalidateActiveConfigCache(db);
   return { version, changeSummary };
 }
 
