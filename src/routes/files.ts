@@ -86,6 +86,45 @@ fileRoutes.post('/upload', async (c) => {
       burn_after_seconds: burnAfterSeconds,
     });
 
+    // 联动优化：若是群聊且配置了 GROUP_MASTER_DO，向 MasterDO 同步以触发在线 WebSocket 即时广播
+    if (c.env.GROUP_MASTER_DO && !conversationId.startsWith('direct:')) {
+      try {
+        const masterId = c.env.GROUP_MASTER_DO.idFromName(conversationId);
+        const stub = c.env.GROUP_MASTER_DO.get(masterId);
+        const broadcastPromise = stub.fetch('http://internal/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: result.message.id,
+            conversationId,
+            senderId: user.id,
+            type: 'file',
+            content: result.message.content,
+            metadata: {
+              file_id: result.file.id,
+              file_name: result.file.file_name,
+              mime_type: result.file.mime_type,
+              size: result.file.size,
+            },
+            createdAt: result.message.created_at,
+            skipD1WriteBack: true,
+            asyncBroadcast: true,
+          }),
+        }).catch((e) => console.error('[HTTP->DO File Broadcast failed]:', e));
+        let executionCtx: any;
+        try {
+          executionCtx = c.executionCtx;
+        } catch {}
+        if (executionCtx) {
+          executionCtx.waitUntil(broadcastPromise);
+        } else {
+          await broadcastPromise;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     return c.json(result, 201);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') || err.message.includes('muted') ? 403 : 400;

@@ -23,8 +23,11 @@
 12. [模块十：用户双重元数据 (Metadata) 与唯一头像 (Avatar &amp; R2)](#12-模块十用户双重元数据-metadata-与唯一头像-avatar--r2)
 13. [模块十一：消息30秒撤回 (Message Recall)](#13-模块十一消息30秒撤回-message-recall)
 14. [模块十二：社交系统：好友列表 (Friends)、好友标签 (Tags) 与黑名单 (Blacklist)](#14-模块十二社交系统好友列表-friends好友标签-tags-与黑名单-blacklist)
-15. [前端 TypeScript 类型定义汇总](#15-前端-typescript-类型定义汇总)
-16. [完整前端集成示例代码 (TypeScript SDK)](#16-完整前端集成示例代码-typescript-sdk)
+15. [模块十三：超级万人群与 WebSocket 实时推送 (Supergroups &amp; WebSockets)](#15-模块十三超级万人群与-websocket-实时推送-supergroups--websockets)
+16. [模块十四：类似 Telegram 的智能机器人系统 (Telegram-like Bots)](#16-模块十四类似-telegram-的智能机器人系统-telegram-like-bots)
+17. [模块十五：前端双轨制架构集成指南与生命周期最佳实践 (Dual-Track IM Architecture)](#17-模块十五前端双轨制架构集成指南与生命周期最佳实践-dual-track-im-architecture)
+18. [前端 TypeScript 类型定义汇总](#18-前端-typescript-类型定义汇总)
+19. [完整前端集成示例代码 (TypeScript SDK &amp; Supergroup Hook)](#19-完整前端集成示例代码-typescript-sdk--supergroup-hook)
 
 ---
 
@@ -447,6 +450,35 @@ export const GroupTopMarqueeBanner: React.FC<GroupBannerProps> = ({ metadata }) 
 ---
 
 ### 5.3 群成员管理：邀请、踢人与退群 (需求 ④、⑤)
+
+#### 5.3.0 获取群成员列表与游标分页 (Cursor Pagination)
+- **接口路径**：`GET WORKER_BASE_URL/groups/:id/members`
+- **认证要求**：需要 `Authorization: Bearer <TOKEN>`（必须为该群成员）
+- **查询参数 (Query Parameters)**：
+  - `limit`（可选）：单页拉取数量（默认不传为全量获取，传入范围建议 `1 ~ 200`）。
+  - `cursor`（可选）：游标标识符，取上一页返回的 `next_cursor`。
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "members": [
+      {
+        "id": "group_xxx:0xuser_1",
+        "conversation_id": "group_xxx",
+        "user_id": "0xuser_1",
+        "role": "owner",
+        "group_nickname": "群主老王",
+        "is_muted": false,
+        "muted_until": null,
+        "mute_reason": null,
+        "joined_at": 1727769600000,
+        "wallet_address": "0xuser_1"
+      }
+    ],
+    "next_cursor": "1727769600000:group_xxx:0xuser_1",
+    "has_more": true,
+    "total": 128
+  }
+  ```
 
 #### 5.3.1 添加群成员
 - **接口路径**：`POST WORKER_BASE_URL/groups/:id/members`
@@ -1652,7 +1684,691 @@ setInterval(syncLoop, 3000);
 
 ---
 
-## 15. 前端 TypeScript 类型定义汇总
+## 15. 模块十三：超级万人群与 WebSocket 实时推送 (Supergroups & WebSockets)
+
+### 15.1 超级群核心架构与设计规范
+
+在面向 10,000 ~ 100,000+ 成员的超大规模群聊（超级群）场景下，传统的“每人入库写回执”与“全量轮询”会导致 D1 数据库写入风暴以及边缘 Worker 内存溢出 (OOM)。为此，后端采用 **Cloudflare Durable Objects 双层分片架构**：
+
+```mermaid
+flowchart TD
+    Client1["在线客户端 A"] -- "WebSocket 长连接" --> Shard0["GroupBroadcasterDO (分片 0)"]
+    Client2["在线客户端 B"] -- "WebSocket 长连接" --> Shard1["GroupBroadcasterDO (分片 1)"]
+    ClientN["在线客户端 N (10万并发)"] -- "WebSocket 长连接" --> Shard49["GroupBroadcasterDO (分片 49)"]
+
+    Shard0 -- "批量已读水位线同步" --> MasterDO["GroupMasterDO (单群全局唯一协调器)"]
+    Shard1 -- "批量已读水位线同步" --> MasterDO
+    Shard49 -- "批量已读水位线同步" --> MasterDO
+
+    MasterDO -- "自适应扇出 (Fan-out 广播)" --> Shard0
+    MasterDO -- "自适应扇出 (Fan-out 广播)" --> Shard1
+    MasterDO -- "自适应扇出 (Fan-out 广播)" --> Shard49
+
+    MasterDO -- "自增递增 Seq + 500条 RingBuffer" --> D1AutoBatch["D1WriteBatcher (SQLite 异步落盘)"]
+```
+
+1. **GroupMasterDO (群主协调器)**：
+   - 负责全局单调递增绝对序列号（`seq` 发号器，从 1 开始严格自增）；
+   - 维护最新 500 条消息的内存环形缓冲区 (`RingBuffer`)，保证新进入群的用户以微秒级延迟获取最新上下文；
+   - 维护全群慢速发言模式 (Slow Mode) 控频计数器；
+   - 异步微批写回 D1 数据库，消除锁竞争。
+2. **GroupBroadcasterDO (广播分片器)**：
+   - 每个超级群默认部署 50 个分片（`shard_0` ~ `shard_49`）；
+   - 用户按照钱包地址 Hash 散列至对应分片建立 WebSocket 长连接，单群轻松支撑 10 万+ 用户在线；
+   - 采用 100ms 批量聚合防抖推送（Coalesced Batching），彻底避免高频刷屏导致的客户端 UI 掉帧；
+   - 客户端只需上报水位线（`read_watermark`），分片自动做内存 Debounce 并周期性同步至 MasterDO。
+
+---
+
+### 15.2 WebSocket 握手与长连接建立
+
+#### 1. 连接地址
+客户端发起标准 WebSocket 握手：
+```text
+wss://WORKER_BASE_URL/groups/:groupId/ws?token=<bearer_jwt_token>
+```
+或者在握手阶段传递请求头：
+```http
+Authorization: Bearer <bearer_jwt_token>
+```
+
+#### 2. 安全与性能守卫
+- **$O(1)$ 极速验权**：服务端直接执行索引级单点查询检查成员资格与角色，**绝不加载 10 万成员全表**，彻底杜绝 Worker 128MB 物理内存崩溃。
+- **自动分片路由**：Worker 会自动计算 `hash(user_id) % 50` 并反向代理升级至对应的 BroadcasterDO 分片。
+- **禁言保护**：若用户正处于禁言期（`muted_until > now`），连接成功后仍无法发送消息。
+- **远程剔除与强踢断连**：当用户被踢出群或被管理员封禁，服务端会主动向对应分片广播踢人信令，下发 `kicked` 事件并以 Code `4003` (`KICKED_FROM_GROUP`) 关闭 WebSocket。
+
+---
+
+### 15.3 客户端上行消息帧规范 (Client -> Server Action)
+
+客户端必须通过 `ws.send(JSON.stringify(payload))` 发送 JSON 字符串。格式必须包含 `action` 字段：
+
+#### 1. 心跳保活 (`action: "ping"`)
+前端应当设置 30 秒定时器保活，防 NAT 超时断开：
+```json
+{
+  "action": "ping"
+}
+```
+服务端应答：
+```json
+{
+  "type": "pong",
+  "timestamp": 1788587800000
+}
+```
+
+#### 2. 断网重连与补洞拉取 (`action: "sync"`)
+当网络出现抖动、重连或发现下行消息序列号 `seq` 产生跳跃断层时，客户端发起补洞拉取：
+```json
+{
+  "action": "sync",
+  "since_seq": 1050
+}
+```
+服务端返回补洞结果：
+```json
+{
+  "type": "sync_result",
+  "messages": [
+    {
+      "id": "b315c4ec-d41f-48bb-b1dc-9a85f39cce93",
+      "seq": 1051,
+      "senderId": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+      "type": "text",
+      "content": "Hello supergroup!",
+      "createdAt": 1788587810000
+    }
+  ],
+  "latestSeq": 1055,
+  "hasMore": false
+}
+```
+
+#### 3. 极速上行发送消息 (`action: "send"`)
+客户端无需发起耗时的 HTTP POST 请求，直接通过 WebSocket 帧高速发送：
+```json
+{
+  "action": "send",
+  "content": "这是一条直接走长连接的高性能群聊消息！",
+  "id": "optional-client-msg-uuid",
+  "type": "text",
+  "metadata": {}
+}
+```
+- **字段规范与安全限制**：
+  - `content`: 必填字符串，长度限制在 1 ~ 4000 字符内，服务端严格拦截空串与超长恶意 DoS Payload。
+  - `id`: 可选自定义 UUID（建议前端通过 `crypto.randomUUID()` 预生成以实现乐观 UI 匹配）。若未传则由服务端生成。
+  - `type`: 消息类型，默认为 `"text"`。
+- **慢速模式 (Slow Mode) 防刷拦截**：
+  若群聊开启了慢速模式（如 30 秒冷却），且发送者**不是**群主 (`owner`) 或管理员 (`admin`)：
+  - 若在冷却期内发言，发送失败并收到错误帧：
+    ```json
+    {
+      "type": "send_error",
+      "error": "SLOW_MODE_COOLDOWN",
+      "remainingSeconds": 18
+    }
+    ```
+    前端应据此在输入框显示“发言冷却中 (18s)”，倒计时结束后解除锁定。
+  - 若已过冷却期或拥有管理员白名单特权，发送成功并收到：
+    ```json
+    {
+      "type": "send_ack",
+      "success": true,
+      "message": {
+        "id": "b315c4ec-d41f-48bb-b1dc-9a85f39cce93",
+        "seq": 1052,
+        "senderId": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+        "type": "text",
+        "content": "这是一条直接走长连接的高性能群聊消息！",
+        "createdAt": 1788587820000
+      }
+    }
+    ```
+
+#### 4. 已读水位线汇报 (`action: "read_watermark"`)
+客户端接收并渲染到某条消息时，上报其 `seq`：
+```json
+{
+  "action": "read_watermark",
+  "last_read_seq": 1052
+}
+```
+> [!TIP]
+> **设计优势**：在 10 万人超级群中，严禁对每条消息调用 HTTP `/messages/:id/read`！通过上报 `last_read_seq` 水位线，Broadcaster 会在内存中对同一用户的已读上报进行合并（5秒内防抖），批量异步同步至 MasterDO，实现极高的处理吞吐量。
+
+---
+
+### 15.4 服务端下行推送帧规范 (Server -> Client Event)
+
+客户端在 `ws.onmessage` 中解析服务端下发的 JSON 帧，依据 `type` 分发：
+
+#### 1. 批量消息广播 (`type: "messages_batch"`)
+服务端将 100ms 内产生的消息合并成批次全量广播给当前分片所有在线连接：
+```json
+{
+  "type": "messages_batch",
+  "messages": [
+    {
+      "id": "msg-seq-1052",
+      "seq": 1052,
+      "senderId": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+      "type": "text",
+      "content": "超级群大家好！",
+      "createdAt": 1788587820000
+    },
+    {
+      "id": "msg-seq-1053",
+      "seq": 1053,
+      "senderId": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2",
+      "type": "text",
+      "content": "Welcome everyone!",
+      "createdAt": 1788587820050
+    }
+  ]
+}
+```
+**前端处理逻辑**：
+1. 遍历 `messages` 数组，根据 `message.id` 或本地乐观队列进行去重；
+2. 校验消息序列号：若接收到的最小 `seq > localLastSeq + 1`，说明发生了断层漏消息，立即触发一次 `{ "action": "sync", "since_seq": localLastSeq }`；
+3. 更新本地当前最大已读 `localLastSeq = Math.max(localLastSeq, message.seq)`；
+4. 若聊天窗口当前处于激活状态，防抖（如延时 500ms）发送一次 `{ "action": "read_watermark", "last_read_seq": localLastSeq }`。
+
+#### 2. 消息实时撤回通知 (`type: "message_recalled"`)
+当群成员（或管理员）撤回某条消息后，群内所有在线 WebSocket 会实时收到广播：
+```json
+{
+  "type": "message_recalled",
+  "message_id": "msg-seq-1052",
+  "conversation_id": "group:0x1610...:dao-chat"
+}
+```
+**前端处理逻辑**：在消息列表中定位 `message_id`，将其内容置为 `"[Message recalled]"` 并更新 UI 渲染为“该消息已撤回”。
+
+#### 3. 成员被移出/被踢下线通知 (`type: "kicked"`)
+```json
+{
+  "type": "kicked",
+  "reason": "REMOVED_FROM_GROUP"
+}
+```
+通知发出后，服务端会主动以 Code `4003` (`KICKED_FROM_GROUP`) 断开此 WebSocket 连接。前端应提示“您已被移出该群”并自动跳转返回会话列表。
+
+---
+
+### 15.5 超级群配套 HTTP 降级与管理接口
+
+#### 1. 拉取超级群历史消息 (GET /groups/:id/supergroup/messages)
+- **请求路径**：`GET WORKER_BASE_URL/groups/:id/supergroup/messages?since_seq=1000&limit=50`
+- **请求头**：`Authorization: Bearer <token>`
+- **用途**：进入超级群时的首屏历史拉取，或 WebSocket 断连时的 HTTP 备用降级拉取。优先从 MasterDO 内存 RingBuffer（0ms 延迟）读取，超出的范围自动从 D1 索引拉取。
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "messages": [
+      {
+        "id": "msg-uuid-1",
+        "seq": 1001,
+        "senderId": "0x1610...",
+        "type": "text",
+        "content": "Hello",
+        "createdAt": 1788587800000
+      }
+    ],
+    "latestSeq": 1055,
+    "hasMore": false
+  }
+  ```
+
+#### 2. 获取超级群实时运行指标 (GET /groups/:id/supergroup/stats)
+- **请求路径**：`GET WORKER_BASE_URL/groups/:id/supergroup/stats`
+- **请求头**：`Authorization: Bearer <token>`
+- **权限要求**：必须是该群成员。
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "group_id": "group:0x1610...:dao-chat",
+    "currentSeq": 1055,
+    "ringBufferSize": 120,
+    "pendingWritesCount": 0,
+    "slowModeSeconds": 30,
+    "activeShardsCount": 4,
+    "activeShards": [0, 5, 23, 41]
+  }
+  ```
+
+#### 3. 配置慢速发言模式 (POST /groups/:id/slow-mode)
+- **请求路径**：`POST WORKER_BASE_URL/groups/:id/slow-mode`
+- **请求头**：`Authorization: Bearer <token>`
+- **权限要求**：仅限群主 (`owner`) 与管理员 (`admin`)。
+- **请求体 (application/json)**：
+  ```json
+  {
+    "seconds": 30
+  }
+  ```
+  > `seconds` 取值范围：`0`（关闭慢速模式）到 `3600`（最长冷却1小时）。
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "success": true,
+    "group_id": "group:0x1610...:dao-chat",
+    "slow_mode_seconds": 30
+  }
+  ```
+
+---
+
+## 16. 模块十四：类似 Telegram 的智能机器人系统 (Telegram-like Bots)
+
+Web3 Chat Worker 提供了完整的类似 Telegram 风格的机器人子系统：
+- 任何注册用户均可创建并管理属于自己的 Bot（BotFather 模式）；
+- 每个机器人拥有唯一的 `id`、`username` 与独立凭据 `api_key`；
+- 机器人可加入群组、主动发送通知、跨群广播、拉取消息、执行踢人/禁言等群管操作；
+- **超级群全域打通**：Bot 通过 `/bot/messages/send` 发送的消息会自动被路由至 `GroupMasterDO`，超级群中所有在线的 WebSocket 客户端能即时毫秒级收到 Bot 发出的消息！
+
+---
+
+### 16.1 用户管理机器人 API (User -> Bot Management)
+
+使用当前登录用户的 JWT Token（Header: `Authorization: Bearer <user_token>`）调用：
+
+#### 1. 创建机器人 (POST /bots)
+- **请求路径**：`POST WORKER_BASE_URL/bots`
+- **用户配额**：每个钱包地址最多可创建 **20** 个 Bot。
+- **请求体 (application/json)**：
+  ```json
+  {
+    "name": "DAO Alert Bot",
+    "description": "Notifies community about governance proposals",
+    "bot_type": "telegram_like",
+    "webhook_url": "https://my-backend.com/api/bot-webhook"
+  }
+  ```
+- **成功响应 (`HTTP 201`)**：
+  ```json
+  {
+    "bot": {
+      "id": "bot_9f3a1b4c_2d8e",
+      "name": "DAO Alert Bot",
+      "username": "dao_alert_bot",
+      "description": "Notifies community about governance proposals",
+      "avatar_url": null,
+      "owner_id": "0x1610725056c027d5ae4e2fce73bb925c82c59eaa",
+      "api_key": "bot_sec_8f912e74da605ab...",
+      "status": "active",
+      "created_at": 1788587800000,
+      "updated_at": 1788587800000
+    }
+  }
+  ```
+  > [!CAUTION]
+  > ⚠️ **关键安全注意**：`api_key` 仅在**创建成功**以及**重置 Key** 时在响应中明文返回一次！数据库仅保存其哈希值。前端必须弹出模态窗口提示用户妥善保存。
+
+#### 2. 获取我创建的机器人列表 (GET /bots)
+- **请求路径**：`GET WORKER_BASE_URL/bots`
+- **成功响应 (`HTTP 200`)**：返回当前用户名下所有 Bot 的数组（不包含 `api_key`）。
+
+#### 3. 获取机器人详情 (GET /bots/:id)
+- **请求路径**：`GET WORKER_BASE_URL/bots/:id`
+- **成功响应 (`HTTP 200`)**：返回指定的 Bot 详情对象。
+
+#### 4. 更新机器人信息 (PATCH /bots/:id)
+- **请求路径**：`PATCH WORKER_BASE_URL/bots/:id`
+- **请求体 (application/json)**：
+  ```json
+  {
+    "name": "DAO Alert Bot v2",
+    "description": "Upgraded notification system",
+    "webhook_url": "https://new-url.com/webhook",
+    "is_active": true
+  }
+  ```
+- **成功响应 (`HTTP 200`)**：返回更新后的 Bot 对象。
+
+#### 5. 重置机器人 API Key (POST /bots/:id/reset-key)
+- **请求路径**：`POST WORKER_BASE_URL/bots/:id/reset-key`
+- **成功响应 (`HTTP 200`)**：
+  ```json
+  {
+    "success": true,
+    "bot_id": "bot_9f3a1b4c_2d8e",
+    "api_key": "bot_sec_new_generated_secret_key"
+  }
+  ```
+
+#### 6. 删除机器人 (DELETE /bots/:id)
+- **请求路径**：`DELETE WORKER_BASE_URL/bots/:id`
+- **成功响应 (`HTTP 200`)**：`{"success": true}`
+
+---
+
+### 16.2 机器人独立执行 OpenAPI (Bot Execution API)
+
+机器人脚本或第三方后台服务直接调用此类接口。
+- **鉴权 Header**：`X-Bot-Api-Key: <api_key>` 或 `Authorization: Bearer <api_key>`。
+- **高频性能优化**：Worker 服务端对 Bot 凭据提供了 20 秒全局内存缓存（TTL In-Memory Cache），高频事件轮询不会击穿 D1 数据库。
+
+#### 1. 获取 Bot 自身状态 (GET /bot/me)
+- **请求路径**：`GET WORKER_BASE_URL/bot/me`
+- **成功响应 (`HTTP 200`)**：返回 Bot 自己的资料与状态。
+
+#### 2. 获取 Bot 所在群聊列表 (GET /bot/groups)
+- **请求路径**：`GET WORKER_BASE_URL/bot/groups` 或 `GET WORKER_BASE_URL/bot/conversations`
+- **成功响应 (`HTTP 200`)**：返回该 Bot 已加入的全部群聊详情。
+
+#### 3. Bot 主动加入群聊 (POST /bot/groups/join)
+- **请求路径**：`POST WORKER_BASE_URL/bot/groups/join`
+- **请求体 (application/json)**：
+  ```json
+  {
+    "group_id": "group:0x1610...:dao-chat",
+    "invite_token": "optional_invite_code"
+  }
+  ```
+- **成功响应 (`HTTP 200`)**：`{"result": {"conversation_id": "...", "joined": true}}`
+
+#### 4. Bot 发送群聊消息 (POST /bot/messages/send)
+- **请求路径**：`POST WORKER_BASE_URL/bot/messages/send`
+- **请求体 (application/json)**：
+  ```json
+  {
+    "conversation_id": "group:0x1610...:dao-chat",
+    "content": "📢 [提案提醒] 新的治理提案 #104 已上线，请群成员在 24 小时内投票！",
+    "type": "text",
+    "mentions": ["0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2"]
+  }
+  ```
+- **成功响应 (`HTTP 201`)**：返回创建的消息对象。
+- **多端实时联动**：若目标群是超级群，后端会自动将该消息注入 `GroupMasterDO`，在线 WebSocket 会在 50ms 内将该 Bot 消息推送给所有在线群成员。
+
+#### 5. Bot 跨群批量广播 (POST /bot/messages/broadcast)
+- **请求路径**：`POST WORKER_BASE_URL/bot/messages/broadcast`
+- **请求体 (application/json)**：
+  ```json
+  {
+    "conversation_ids": [
+      "group:0x1610...:dao-announcement",
+      "group:0x1610...:vip-lounge"
+    ],
+    "content": "紧急安全升级通知：请群友谨防假冒管理员私聊！"
+  }
+  ```
+
+#### 6. Bot 增量同步消息事件 (GET /bot/sync)
+- **请求路径**：`GET WORKER_BASE_URL/bot/sync?since=1788587800000&limit=100`
+- **用途**：用于基于长轮询模式开发的机器人服务，增量获取收到的新消息。
+
+#### 7. Bot 执行群管踢人 (POST /bot/groups/:id/kick)
+- **请求路径**：`POST WORKER_BASE_URL/bot/groups/:id/kick`
+- **权限要求**：该 Bot 在群内必须已被群主任命为 `admin` 或为群主。
+- **请求体 (application/json)**：
+  ```json
+  {
+    "user_id": "0x2c3dda511fd990cfa846acba9242c8aed3fbc7c2"
+  }
+  ```
+- **系统联动**：从群成员表移除，物理清理其发出的语音文件，并**立即向 BroadcasterDO 发起踢人下线，切断其 WebSocket 连接**。
+
+#### 8. Bot 执行禁言与解禁
+- **全群禁言**：`POST WORKER_BASE_URL/bot/groups/:id/mute`
+  - 请求体：`{ "muted": true, "duration_seconds": 3600 }`
+- **单人禁言**：`POST WORKER_BASE_URL/bot/groups/:id/mute-member`
+  - 请求体：`{ "user_id": "0x2c3d...", "muted": true, "duration_seconds": 600, "reason": "违规发送广告" }`
+
+#### 9. Bot 主动退群 (POST /bot/groups/:id/leave)
+- **请求路径**：`POST WORKER_BASE_URL/bot/groups/:id/leave`
+- **成功响应 (`HTTP 200`)**：`{"success": true}`
+
+---
+
+## 17. 模块十五：前端双轨制架构集成指南与生命周期最佳实践 (Dual-Track IM Architecture)
+
+### 17.1 为什么必须采用双轨制（Dual-Track）？
+
+在 Web3 / 现代 IM 客户端中，如果一个用户加入了 30 个超级万人群：
+- **致命痛点**：若前端对每个群都同时建立一个 WebSocket 连接，移动端（iOS / Android / 微信小程序 / 浏览器）将面临 30 条并行长连接。每个超级群每秒都在疯狂广播消息，客户端每秒需要解析几千条 JSON 帧，导致 **手机发烫、电池十几分钟耗尽、内存溢出（OOM Crash）、甚至被操作系统强行杀死后台进程**。
+- **双轨制架构解决方案**：
+
+| 维度 | 轨道一：全局增量同步 (Track 1: Global Sync) | 轨道二：按需超级群长连接 (Track 2: Active Supergroup WS) |
+| :--- | :--- | :--- |
+| **接入技术** | 轻量 HTTP `GET /sync?since=<timestamp>` | 实时 WebSocket `wss://.../groups/:id/ws` |
+| **生效范围** | **应用全局生命周期**（常驻后台/前台） | **仅在用户打开某个超级群聊天窗口时动态激活** |
+| **主要职责** | 1. 会话列表（Conversations List）更新<br>2. 会话最后一条消息预览与时间戳<br>3. 各群未读消息红点计数 (Unread Badges)<br>4. 私聊 (1v1 Direct) 与普通小群收发 | 1. 聊天窗口内 50ms 极速毫秒级流式消息刷新<br>2. 聊天窗口内的实时消息撤回动画<br>3. WebSocket 快速通道发消息 (`action: send`)<br>4. 批量已读水位线流式汇报 (`action: read_watermark`) |
+| **生命周期** | 前台激活时每 3~5 秒轮询一次；切入后台停止轮询 | **进入超级群页面建立连接；离开该群或切后台立即关闭！** |
+
+---
+
+### 17.2 双轨制集成完整时序图
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 用户
+    participant App as 前端 App / UI
+    participant GlobalSync as 全局同步引擎 (Track 1)
+    participant GroupWS as 群长连接引擎 (Track 2)
+    participant Backend as 后端 Worker & DO
+
+    Note over App,GlobalSync: 用户在“会话列表”页面浏览
+    loop 每 3~5 秒轮询
+        GlobalSync->>Backend: GET /sync?since=last_sync_ts
+        Backend-->>GlobalSync: 返回各会话最后一条消息与未读数
+        GlobalSync->>App: 刷新各群红点数字与预览文本
+    end
+
+    Note over User,GroupWS: 用户点击进入“以太坊开发者超级群”
+    App->>GroupWS: 触发 Hook: connectSupergroupWs(groupId)
+    GroupWS->>Backend: 1. HTTP 预热拉取: GET /groups/:id/supergroup/messages?since_seq=0
+    Backend-->>GroupWS: 返回最近 50 条消息与 latestSeq
+    GroupWS->>Backend: 2. 升级 WebSocket: wss://.../groups/:id/ws?token=...
+    Backend-->>GroupWS: 握手成功 (分配至分片 Shard 12)
+
+    Note over GroupWS,Backend: 活跃聊天中 (毫秒级实时流)
+    Backend-->>GroupWS: 下发下行帧: type = "messages_batch"
+    GroupWS->>App: 局部更新消息列表，自动滚动到底部
+    GroupWS->>Backend: 上报已读水位线: action = "read_watermark", last_read_seq = 1052
+    
+    User->>App: 点击发送 "GM Web3!"
+    App->>GroupWS: 发送上行帧: action = "send", content = "GM Web3!"
+    GroupWS->>Backend: 发送
+    Backend-->>GroupWS: 返回 send_ack 确认
+
+    Note over User,GroupWS: 用户点击“返回”按钮退出超级群
+    App->>GroupWS: 触发组件卸载 cleanup: ws.close()
+    GroupWS->>Backend: 断开 WebSocket 释放分片连接
+    Note over App,GlobalSync: 重新切回仅由 Track 1 维护会话列表
+```
+
+---
+
+### 17.3 生产级 React Hook 实现 (`useSupergroupWebSocket.ts`)
+
+可直接在 React / Next.js 项目中使用：
+
+```typescript
+import { useEffect, useRef, useState, useCallback } from "react";
+import type { SupergroupMessageItem, SupergroupWsServerEvent, SupergroupWsClientAction } from "../types/chat";
+
+interface UseSupergroupWebSocketOptions {
+  groupId: string;
+  baseUrl: string;
+  token: string;
+  onMessageReceived?: (msg: SupergroupMessageItem) => void;
+  onMessageRecalled?: (messageId: string) => void;
+  onKicked?: (reason: string) => void;
+}
+
+export function useSupergroupWebSocket({
+  groupId,
+  baseUrl,
+  token,
+  onMessageReceived,
+  onMessageRecalled,
+  onKicked,
+}: UseSupergroupWebSocketOptions) {
+  const [messages, setMessages] = useState<SupergroupMessageItem[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [slowModeCooldown, setSlowModeCooldown] = useState(0);
+  
+  const wsRef = useRef<WebSocket | null>(null);
+  const localLatestSeqRef = useRef<number>(0);
+  const pingTimerRef = useRef<any>(null);
+  const cooldownTimerRef = useRef<any>(null);
+
+  // 1. 发送已读水位线（防抖上报）
+  const sendWatermark = useCallback((seq: number) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          action: "read_watermark",
+          last_read_seq: seq,
+        } as SupergroupWsClientAction)
+      );
+    }
+  }, []);
+
+  // 2. 发送消息快捷方法
+  const sendMessage = useCallback(
+    (content: string, type: "text" | "image" | "file" = "text") => {
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        throw new Error("WebSocket is not connected");
+      }
+      if (slowModeCooldown > 0) {
+        throw new Error(`Slow mode active. Please wait ${slowModeCooldown}s.`);
+      }
+
+      const clientMsgId = crypto.randomUUID();
+      wsRef.current.send(
+        JSON.stringify({
+          action: "send",
+          id: clientMsgId,
+          content,
+          type,
+        } as SupergroupWsClientAction)
+      );
+    },
+    [slowModeCooldown]
+  );
+
+  useEffect(() => {
+    let isMounted = true;
+    const wsBase = baseUrl.replace(/^http/, "ws");
+    const wsUrl = `${wsBase}/groups/${groupId}/ws?token=${token}`;
+
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      if (!isMounted) return;
+      setIsConnected(true);
+
+      // 心跳保持（每 30 秒一次 ping）
+      pingTimerRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ action: "ping" }));
+        }
+      }, 30000);
+
+      // 连接建立后主动发送 sync 检查是否有断层漏消息
+      ws.send(
+        JSON.stringify({
+          action: "sync",
+          since_seq: localLatestSeqRef.current,
+        })
+      );
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data: SupergroupWsServerEvent = JSON.parse(event.data);
+
+        // A. 批量下推新消息
+        if (data.type === "messages_batch" && data.messages) {
+          setMessages((prev) => {
+            const nextList = [...prev];
+            for (const msg of data.messages!) {
+              if (!nextList.some((m) => m.id === msg.id)) {
+                nextList.push(msg);
+                onMessageReceived?.(msg);
+              }
+              if (msg.seq > localLatestSeqRef.current) {
+                localLatestSeqRef.current = msg.seq;
+              }
+            }
+            return nextList;
+          });
+
+          // 自动上报水位线
+          sendWatermark(localLatestSeqRef.current);
+        }
+
+        // B. 消息撤回
+        if (data.type === "message_recalled" && data.message_id) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === data.message_id ? { ...m, content: "[Message recalled]" } : m
+            )
+          );
+          onMessageRecalled?.(data.message_id);
+        }
+
+        // C. 慢速发言模式倒计时
+        if (data.type === "send_error" && data.error === "SLOW_MODE_COOLDOWN") {
+          const waitSec = data.remainingSeconds || 30;
+          setSlowModeCooldown(waitSec);
+          clearInterval(cooldownTimerRef.current);
+          cooldownTimerRef.current = setInterval(() => {
+            setSlowModeCooldown((prev) => {
+              if (prev <= 1) {
+                clearInterval(cooldownTimerRef.current);
+                return 0;
+              }
+              return prev - 1;
+            });
+          }, 1000);
+        }
+
+        // D. 成员被踢下线
+        if (data.type === "kicked") {
+          onKicked?.(data.reason || "Kicked from supergroup");
+        }
+      } catch (err) {
+        console.error("[SupergroupWS] parse error:", err);
+      }
+    };
+
+    ws.onclose = () => {
+      if (!isMounted) return;
+      setIsConnected(false);
+      clearInterval(pingTimerRef.current);
+    };
+
+    // 关键：组件卸载（退出超级群页面）时，务必安全断开长连接！
+    return () => {
+      isMounted = false;
+      clearInterval(pingTimerRef.current);
+      clearInterval(cooldownTimerRef.current);
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
+    };
+  }, [groupId, baseUrl, token, sendWatermark, onMessageReceived, onMessageRecalled, onKicked]);
+
+  return {
+    messages,
+    isConnected,
+    sendMessage,
+    slowModeCooldown,
+  };
+}
+```
+
+---
+
+## 18. 前端 TypeScript 类型定义汇总
 
 可以直接复制到前端项目的 `src/types/chat.ts` 中：
 
@@ -1816,11 +2532,125 @@ export interface SyncResponse {
   sync_timestamp: number;
   has_more: boolean;
 }
+
+// ==================== 超级群 (Supergroups) ====================
+
+export interface SupergroupMessageItem {
+  id: string;
+  seq: number;
+  senderId: string;
+  type: MessageType;
+  content: string | null;
+  createdAt: number;
+  metadata?: Record<string, any>;
+}
+
+export type SupergroupClientActionType = "ping" | "sync" | "send" | "read_watermark";
+
+export interface SupergroupWsClientAction {
+  action: SupergroupClientActionType;
+  id?: string;               // 客户端生成的消息 UUID
+  since_seq?: number;        // 断网补洞起始序号
+  last_read_seq?: number;    // 水位线已读上报最新序号
+  content?: string;          // 消息内容 (1~4000 字符)
+  type?: MessageType;        // 消息类型，默认 text
+  metadata?: Record<string, any>;
+}
+
+export type SupergroupServerEventType = 
+  | "connected"
+  | "pong"
+  | "messages_batch"
+  | "sync_result"
+  | "send_ack"
+  | "send_error"
+  | "message_recalled"
+  | "kicked"
+  | "error";
+
+export interface SupergroupWsServerEvent {
+  type: SupergroupServerEventType;
+  timestamp?: number;
+  messages?: SupergroupMessageItem[];
+  message?: SupergroupMessageItem;
+  latestSeq?: number;
+  hasMore?: boolean;
+  success?: boolean;
+  error?: string;
+  remainingSeconds?: number;
+  message_id?: string;
+  conversation_id?: string;
+  reason?: string;
+}
+
+export interface SupergroupStats {
+  group_id: string;
+  currentSeq: number;
+  ringBufferSize: number;
+  pendingWritesCount: number;
+  slowModeSeconds: number;
+  activeShardsCount: number;
+  activeShards: number[];
+}
+
+export interface SupergroupMessagesResponse {
+  messages: SupergroupMessageItem[];
+  latestSeq: number;
+  hasMore: boolean;
+}
+
+// ==================== 机器人生态 (Bots Ecosystem) ====================
+
+export type BotType = "telegram_like" | "webhook" | "ai_agent";
+export type BotStatus = "active" | "disabled" | "banned";
+
+export interface Bot {
+  id: string;
+  name: string;
+  username: string;
+  description: string | null;
+  avatar_url: string | null;
+  owner_id: string;
+  bot_type?: BotType;
+  webhook_url?: string | null;
+  api_key?: string;          // 仅在创建及重置时返回一次
+  status: BotStatus;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface CreateBotRequest {
+  name: string;
+  description?: string;
+  bot_type?: BotType;
+  webhook_url?: string;
+}
+
+export interface UpdateBotRequest {
+  name?: string;
+  description?: string;
+  webhook_url?: string;
+  is_active?: boolean;
+}
+
+export interface ResetBotKeyResponse {
+  success: boolean;
+  bot_id: string;
+  api_key: string;
+}
+
+export interface BotSendMessageRequest {
+  conversation_id: string;
+  content: string;
+  type?: MessageType;
+  mentions?: string[];
+  expires_in_seconds?: number;
+}
 ```
 
 ---
 
-## 16. 完整前端集成示例代码 (TypeScript SDK)
+## 19. 完整前端集成示例代码 (TypeScript SDK & Supergroup Hook)
 
 基于原生 `fetch` 与 `viem`（或 `ethers.js`），支持即拷即用的轻量客户端封装：
 
@@ -1835,7 +2665,17 @@ import type {
   FileMetadata,
   Friend,
   BlacklistEntry,
-  SyncResponse
+  SyncResponse,
+  SupergroupMessageItem,
+  SupergroupWsClientAction,
+  SupergroupWsServerEvent,
+  SupergroupStats,
+  SupergroupMessagesResponse,
+  Bot,
+  CreateBotRequest,
+  UpdateBotRequest,
+  ResetBotKeyResponse,
+  BotSendMessageRequest
 } from "./types/chat";
 
 export class Web3ChatClient {
@@ -2474,8 +3314,224 @@ export class Web3ChatClient {
       method: "DELETE",
     });
   }
+  // ==================== 14. 超级万人群与 WebSocket 支持 ====================
+
+  /** 获取超级群消息历史（支持按绝对自增 seq 拉取） */
+  public async getSupergroupMessages(
+    groupId: string,
+    sinceSeq = 0,
+    limit = 50
+  ): Promise<SupergroupMessagesResponse> {
+    const params = new URLSearchParams({
+      since_seq: sinceSeq.toString(),
+      limit: limit.toString(),
+    });
+    return this.request<SupergroupMessagesResponse>(`/groups/${groupId}/supergroup/messages?${params.toString()}`);
+  }
+
+  /** 获取超级群实时运行指标（群成员/管理员权限） */
+  public async getSupergroupStats(groupId: string): Promise<SupergroupStats> {
+    return this.request<SupergroupStats>(`/groups/${groupId}/supergroup/stats`);
+  }
+
+  /** 配置超级群慢速发言模式 (0~3600秒，群主/管理员专属) */
+  public async setGroupSlowMode(
+    groupId: string,
+    seconds: number
+  ): Promise<{ success: boolean; group_id: string; slow_mode_seconds: number }> {
+    return this.request(`/groups/${groupId}/slow-mode`, {
+      method: "POST",
+      body: JSON.stringify({ seconds }),
+    });
+  }
+
+  /** 建立超级群原生 WebSocket 连接（按需调用） */
+  public connectSupergroupWs(
+    groupId: string,
+    callbacks?: {
+      onMessage?: (event: SupergroupWsServerEvent) => void;
+      onOpen?: (ws: WebSocket) => void;
+      onClose?: (event: CloseEvent) => void;
+      onError?: (error: Event) => void;
+    }
+  ): WebSocket {
+    const wsBase = this.baseUrl.replace(/^http/, "ws");
+    const wsUrl = `${wsBase}/groups/${groupId}/ws?token=${this.token || ""}`;
+    const ws = new WebSocket(wsUrl);
+
+    if (callbacks?.onOpen) ws.onopen = () => callbacks.onOpen!(ws);
+    if (callbacks?.onClose) ws.onclose = callbacks.onClose;
+    if (callbacks?.onError) ws.onerror = callbacks.onError;
+    if (callbacks?.onMessage) {
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          callbacks.onMessage!(data);
+        } catch {
+          // ignore
+        }
+      };
+    }
+
+    return ws;
+  }
+
+  // ==================== 15. 机器人管理模块 (User -> Bot) ====================
+
+  /** 创建新机器人 (单用户配额上限 20 个) */
+  public async createBot(data: CreateBotRequest): Promise<{ bot: Bot }> {
+    return this.request<{ bot: Bot }>("/bots", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** 获取当前登录用户创建的所有机器人 */
+  public async getMyBots(): Promise<{ bots: Bot[] }> {
+    return this.request<{ bots: Bot[] }>("/bots");
+  }
+
+  /** 获取指定机器人详情 */
+  public async getBot(botId: string): Promise<{ bot: Bot }> {
+    return this.request<{ bot: Bot }>(`/bots/${botId}`);
+  }
+
+  /** 更新机器人配置 */
+  public async updateBot(botId: string, data: UpdateBotRequest): Promise<{ bot: Bot }> {
+    return this.request<{ bot: Bot }>(`/bots/${botId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** 重置机器人 API Key (Key 仅展示一次) */
+  public async resetBotApiKey(botId: string): Promise<ResetBotKeyResponse> {
+    return this.request<ResetBotKeyResponse>(`/bots/${botId}/reset-key`, {
+      method: "POST",
+    });
+  }
+
+  /** 删除机器人 */
+  public async deleteBot(botId: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/bots/${botId}`, {
+      method: "DELETE",
+    });
+  }
+}
+
+// ==================== 独立机器人客户端 (Web3BotClient) ====================
+
+export class Web3BotClient {
+  private baseUrl: string;
+  private apiKey: string;
+
+  constructor(baseUrl: string, apiKey: string) {
+    this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.apiKey = apiKey;
+  }
+
+  private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+    const headers: Record<string, string> = {
+      ...(options.headers as Record<string, string>),
+      "X-Bot-Api-Key": this.apiKey,
+      "Content-Type": "application/json",
+    };
+
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      ...options,
+      headers,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || `Request failed with status ${res.status}`);
+    }
+
+    return res.json();
+  }
+
+  /** 获取机器人自身状态 */
+  public async getMe(): Promise<{ bot: Bot }> {
+    return this.request<{ bot: Bot }>("/bot/me");
+  }
+
+  /** 获取机器人加入的所有群聊 */
+  public async getMyGroups(): Promise<{ groups: Conversation[] }> {
+    return this.request<{ groups: Conversation[] }>("/bot/groups");
+  }
+
+  /** 机器人主动加入群聊 */
+  public async joinGroup(params: { group_id?: string; invite_token?: string }): Promise<{ result: any }> {
+    return this.request("/bot/groups/join", {
+      method: "POST",
+      body: JSON.stringify(params),
+    });
+  }
+
+  /** 机器人发送群聊消息（自动打通超级群 GroupMasterDO 实时广播） */
+  public async sendMessage(params: BotSendMessageRequest): Promise<{ message: Message }> {
+    return this.request<{ message: Message }>("/bot/messages/send", {
+      method: "POST",
+      body: JSON.stringify(params),
+    });
+  }
+
+  /** 机器人批量跨群广播 */
+  public async broadcast(conversationIds: string[], content: string): Promise<any> {
+    return this.request("/bot/messages/broadcast", {
+      method: "POST",
+      body: JSON.stringify({ conversation_ids: conversationIds, content }),
+    });
+  }
+
+  /** 机器人增量事件同步轮询 */
+  public async syncUpdates(since = 0, limit = 100): Promise<SyncResponse> {
+    return this.request<SyncResponse>(`/bot/sync?since=${since}&limit=${limit}`);
+  }
+
+  /** 机器人群管踢人（自动切断其 WebSocket 连接） */
+  public async kickMember(groupId: string, targetUserId: string): Promise<{ success: boolean }> {
+    return this.request(`/bot/groups/${groupId}/kick`, {
+      method: "POST",
+      body: JSON.stringify({ user_id: targetUserId }),
+    });
+  }
+
+  /** 机器人全群禁言/解禁 */
+  public async setGroupMute(groupId: string, muted: boolean, durationSeconds?: number): Promise<any> {
+    return this.request(`/bot/groups/${groupId}/mute`, {
+      method: "POST",
+      body: JSON.stringify({ muted, duration_seconds: durationSeconds }),
+    });
+  }
+
+  /** 机器人单人禁言 */
+  public async muteMember(
+    groupId: string,
+    targetUserId: string,
+    durationSeconds = 600,
+    reason?: string
+  ): Promise<any> {
+    return this.request(`/bot/groups/${groupId}/mute-member`, {
+      method: "POST",
+      body: JSON.stringify({
+        user_id: targetUserId,
+        muted: true,
+        duration_seconds: durationSeconds,
+        reason,
+      }),
+    });
+  }
+
+  /** 机器人主动退群 */
+  public async leaveGroup(groupId: string): Promise<{ success: boolean }> {
+    return this.request(`/bot/groups/${groupId}/leave`, {
+      method: "POST",
+    });
+  }
 }
 
 // 快捷工厂（使用 WORKER_BASE_URL 占位符）
 export const createChatClient = (baseUrl: string = "WORKER_BASE_URL") => new Web3ChatClient(baseUrl);
+export const createBotClient = (apiKey: string, baseUrl: string = "WORKER_BASE_URL") => new Web3BotClient(baseUrl, apiKey);
 ```

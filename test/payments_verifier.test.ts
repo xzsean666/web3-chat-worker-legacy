@@ -231,6 +231,21 @@ describe('verifyOrder (契约 §5)', () => {
     expect(res.outcome).toBe('verified');
   });
 
+  it('block time with minor future clock drift (+60s) is accepted within buffer', async () => {
+    const order = await makeOrder();
+    const futureSec = Math.floor(Date.now() / 1000) + 60; // 60s in the future
+    const res = await verifyOrder(db, order, chain, stubClient({ getBlockTimestamp: async () => futureSec }));
+    expect(res.outcome).toBe('verified');
+  });
+
+  it('block time far in the future (+300s) is rejected as invalid_block_time', async () => {
+    const order = await makeOrder();
+    const futureSec = Math.floor(Date.now() / 1000) + 300; // 300s in the future, exceeds 120s buffer
+    const res = await verifyOrder(db, order, chain, stubClient({ getBlockTimestamp: async () => futureSec }));
+    expect(res.outcome).toBe('failed');
+    expect(res.order.status_reason).toBe('invalid_block_time');
+  });
+
   it('all RPCs down → retry, status unchanged', async () => {
     const order = await makeOrder();
     const broken: PaymentChainClient = {

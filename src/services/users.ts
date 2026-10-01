@@ -7,7 +7,6 @@ export const ALLOWED_AVATAR_MIME_TYPES: Record<string, string> = {
   'image/png': 'png',
   'image/webp': 'webp',
   'image/gif': 'gif',
-  'image/svg+xml': 'svg',
 };
 
 export const MAX_AVATAR_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
@@ -257,7 +256,7 @@ export async function uploadUserAvatar(
   const ext = ALLOWED_AVATAR_MIME_TYPES[normalizedMime];
   if (!ext) {
     throw new Error(
-      `Unsupported avatar image format: ${options.mimeType}. Allowed: jpeg, png, webp, gif, svg`
+      `Unsupported avatar image format: ${options.mimeType}. Allowed: jpeg, png, webp, gif`
     );
   }
 

@@ -499,3 +499,35 @@ export interface BotRow {
   created_at: number;
   updated_at: number;
 }
+
+// ---------------------------------------------------------------------------
+// Bot Extensions (Tasks & Audit Logs) (migration 0027)
+// ---------------------------------------------------------------------------
+
+export type BotTaskType = 'text' | 'image' | 'video';
+export type BotTaskStatus = 'pending' | 'executed' | 'cancelled' | 'failed';
+
+export interface BotTaskRow {
+  id: string;
+  bot_id: string;
+  group_id: string;
+  type: BotTaskType;
+  content: string | null;
+  media_url: string | null;
+  schedule_time: number;
+  status: BotTaskStatus;
+  error_reason: string | null;
+  created_at: number;
+  executed_at: number | null;
+}
+
+export interface BotAuditLogRow {
+  id: string;
+  bot_id: string;
+  group_id: string | null;
+  action: string;
+  target_id: string | null;
+  details: string | null;
+  created_at: number;
+}
+

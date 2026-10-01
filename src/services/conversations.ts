@@ -110,7 +110,8 @@ async function sendGroupSystemEvent(
   conversationId: string,
   senderId: string,
   event: Record<string, unknown>,
-  now = Date.now()
+  now = Date.now(),
+  groupMasterDO?: DurableObjectNamespace
 ): Promise<MessageRow> {
   const id = crypto.randomUUID();
   const expiresAt = now + 24 * 60 * 60 * 1000;
@@ -120,6 +121,29 @@ async function sendGroupSystemEvent(
       id, conversation_id, sender_id, type, content, retention, status, expires_at, created_at, burn_after_seconds, mentions
     ) VALUES (?, ?, ?, 'system', ?, 'permanent', 'pending', ?, ?, NULL, '[]')
   `).bind(id, conversationId, senderId, content, expiresAt, now).run();
+
+  if (groupMasterDO && !conversationId.startsWith('direct:')) {
+    try {
+      const masterId = groupMasterDO.idFromName(conversationId);
+      const stub = groupMasterDO.get(masterId);
+      void stub.fetch('http://internal/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id,
+          conversationId,
+          senderId,
+          type: 'system',
+          content,
+          metadata: { system_event: event },
+          createdAt: now,
+          skipD1WriteBack: true,
+        }),
+      }).catch(() => {});
+    } catch {
+      // ignore
+    }
+  }
 
   return {
     id,
@@ -522,6 +546,19 @@ export async function getConversation(
   };
 }
 
+export const MAX_GROUP_NAME_LENGTH = 64;
+export const MAX_GROUP_DESC_LENGTH = 1000;
+export const MAX_GROUP_ANNOUNCEMENT_LENGTH = 2000;
+export const MAX_GROUP_METADATA_BYTES = 10240; // 10KB
+export const PROTECTED_METADATA_KEYS = new Set([
+  'hot',
+  'verified',
+  'banned_reason',
+  'is_banned',
+  'join_gate',
+  'join_price',
+]);
+
 export async function createGroup(
   db: D1Database,
   creatorId: string,
@@ -533,6 +570,9 @@ export async function createGroup(
   const trimmedName = name.trim();
   if (!trimmedName) {
     throw new Error('Group name cannot be empty');
+  }
+  if (trimmedName.length > MAX_GROUP_NAME_LENGTH) {
+    throw new Error(`Group name is too long (max ${MAX_GROUP_NAME_LENGTH} characters)`);
   }
 
   const options: CreateGroupOptions =
@@ -592,20 +632,36 @@ export async function createGroup(
     convId = `${creator.id}:${cleanSlug}-${crypto.randomUUID().replace(/-/g, '').slice(0, 4)}`;
   }
 
+  const cleanMeta = { ...(options.metadata || {}) };
+  for (const key of PROTECTED_METADATA_KEYS) {
+    delete cleanMeta[key];
+  }
+
   const meta: GroupMetadata = {
-    ...(options.metadata || {}),
+    ...cleanMeta,
     name: trimmedName,
   };
   if (options.description) {
+    if (options.description.length > MAX_GROUP_DESC_LENGTH) {
+      throw new Error(`Group description is too long (max ${MAX_GROUP_DESC_LENGTH} characters)`);
+    }
     meta.description = options.description;
   }
   if (options.announcement) {
+    if (options.announcement.length > MAX_GROUP_ANNOUNCEMENT_LENGTH) {
+      throw new Error(`Group announcement is too long (max ${MAX_GROUP_ANNOUNCEMENT_LENGTH} characters)`);
+    }
     meta.announcement = options.announcement;
   }
   if (options.marquee) {
     meta.marquee = options.marquee;
   } else if (options.description) {
     meta.marquee = { enabled: false, text: options.description };
+  }
+
+  const metaJson = JSON.stringify(meta);
+  if (metaJson.length > MAX_GROUP_METADATA_BYTES) {
+    throw new Error(`Group metadata exceeds maximum size of ${MAX_GROUP_METADATA_BYTES} bytes`);
   }
 
   // club 固定 group_type='public'（发现页只覆盖 public club；group_type 列对 club 无用户语义，不接受入参）
@@ -668,13 +724,19 @@ export async function updateGroup(
     if (!trimmed) {
       throw new Error('Group name cannot be empty');
     }
+    if (trimmed.length > MAX_GROUP_NAME_LENGTH) {
+      throw new Error(`Group name is too long (max ${MAX_GROUP_NAME_LENGTH} characters)`);
+    }
     newName = trimmed;
     meta.name = trimmed;
   }
 
   if (updates.metadata) {
-    // 顶层合并：null 表示删除该 key（供"清空腾讯会议链接"等场景）。
+    // 顶层合并：过滤受保护的运营/管理级字段，防提权攻击与伪造认证
     for (const [key, value] of Object.entries(updates.metadata)) {
+      if (PROTECTED_METADATA_KEYS.has(key)) {
+        continue;
+      }
       if (value === null) {
         delete meta[key];
       } else {
@@ -684,6 +746,9 @@ export async function updateGroup(
     if (updates.metadata.name) {
       const trimmed = String(updates.metadata.name).trim();
       if (trimmed) {
+        if (trimmed.length > MAX_GROUP_NAME_LENGTH) {
+          throw new Error(`Group name is too long (max ${MAX_GROUP_NAME_LENGTH} characters)`);
+        }
         newName = trimmed;
         meta.name = trimmed;
       }
@@ -691,6 +756,9 @@ export async function updateGroup(
   }
 
   if (updates.description !== undefined) {
+    if (updates.description && updates.description.length > MAX_GROUP_DESC_LENGTH) {
+      throw new Error(`Group description is too long (max ${MAX_GROUP_DESC_LENGTH} characters)`);
+    }
     meta.description = updates.description;
     if (meta.marquee && !meta.marquee.text) {
       meta.marquee.text = updates.description;
@@ -698,7 +766,15 @@ export async function updateGroup(
   }
 
   if (updates.announcement !== undefined) {
+    if (updates.announcement && updates.announcement.length > MAX_GROUP_ANNOUNCEMENT_LENGTH) {
+      throw new Error(`Group announcement is too long (max ${MAX_GROUP_ANNOUNCEMENT_LENGTH} characters)`);
+    }
     meta.announcement = updates.announcement;
+  }
+
+  const metaJson = JSON.stringify(meta);
+  if (metaJson.length > MAX_GROUP_METADATA_BYTES) {
+    throw new Error(`Group metadata exceeds maximum size of ${MAX_GROUP_METADATA_BYTES} bytes`);
   }
 
   if (updates.marquee !== undefined) {
@@ -1463,11 +1539,24 @@ export async function setGroupNickname(
   };
 }
 
+export interface GetGroupMembersOptions {
+  limit?: number;
+  cursor?: string | null;
+}
+
+export interface GroupMembersResult {
+  members: ConversationMemberWithUser[];
+  next_cursor: string | null;
+  has_more: boolean;
+  total: number;
+}
+
 export async function getGroupMembers(
   db: D1Database,
   conversationId: string,
-  userId: string
-): Promise<ConversationMemberWithUser[]> {
+  userId: string,
+  options?: GetGroupMembersOptions
+): Promise<GroupMembersResult> {
   const conv = await db.prepare('SELECT * FROM conversations WHERE id = ?').bind(conversationId).first<ConversationRow>();
   if (!conv || !isGroupLike(conv.type)) {
     throw new Error('Group not found');
@@ -1481,21 +1570,80 @@ export async function getGroupMembers(
     throw new Error('Unauthorized: you are not a member of this group');
   }
 
-  const membersRes = await db.prepare(`
+  let cursorJoinedAt: number | null = null;
+  let cursorId: string | null = null;
+
+  if (options?.cursor) {
+    try {
+      let raw = options.cursor.trim();
+      if (!raw.includes(':') && !raw.includes('_')) {
+        raw = atob(raw);
+      }
+      const sep = raw.includes(':') ? ':' : '_';
+      const parts = raw.split(sep);
+      if (parts.length >= 2) {
+        const j = parseInt(parts[0], 10);
+        if (!isNaN(j)) {
+          cursorJoinedAt = j;
+          cursorId = parts.slice(1).join(sep);
+        }
+      }
+    } catch {}
+  }
+
+  const isPaginated = typeof options?.limit === 'number' && options.limit > 0;
+  const limit = isPaginated ? Math.min(options!.limit!, 200) : null;
+  const fetchLimit = limit ? limit + 1 : 1000;
+
+  let query = `
     SELECT
       cm.id, cm.conversation_id, cm.user_id, cm.role, cm.muted_until, cm.mute_reason, cm.group_nickname, cm.joined_at, cm.last_read_message_id,
       u.wallet_address
     FROM conversation_members cm
     JOIN users u ON u.id = cm.user_id
     WHERE cm.conversation_id = ?
-    ORDER BY cm.joined_at ASC
-  `).bind(conversationId).all<ConversationMemberWithUser>();
+  `;
+  const binds: any[] = [conversationId];
 
+  if (cursorJoinedAt !== null && cursorId !== null) {
+    query += ` AND (cm.joined_at > ? OR (cm.joined_at = ? AND cm.id > ?))`;
+    binds.push(cursorJoinedAt, cursorJoinedAt, cursorId);
+  }
+
+  query += ` ORDER BY cm.joined_at ASC, cm.id ASC LIMIT ?`;
+  binds.push(fetchLimit);
+
+  const membersRes = await db.prepare(query).bind(...binds).all<ConversationMemberWithUser>();
   const now = Date.now();
-  return membersRes.results.map((m) => ({
+  let rawList = membersRes.results;
+  let hasMore = false;
+
+  if (limit && rawList.length > limit) {
+    hasMore = true;
+    rawList = rawList.slice(0, limit);
+  }
+
+  const members = rawList.map((m) => ({
     ...m,
     is_muted: m.role === 'member' && (m.muted_until === -1 || (m.muted_until !== null && m.muted_until > now)),
   }));
+
+  let nextCursor: string | null = null;
+  if (hasMore && members.length > 0) {
+    const last = members[members.length - 1];
+    nextCursor = `${last.joined_at}:${last.id}`;
+  }
+
+  const totalRow = await db.prepare(
+    'SELECT COUNT(*) AS total FROM conversation_members WHERE conversation_id = ?'
+  ).bind(conversationId).first<{ total: number }>();
+
+  return {
+    members,
+    next_cursor: nextCursor,
+    has_more: hasMore,
+    total: totalRow?.total ?? members.length,
+  };
 }
 
 export async function setGroupMute(
@@ -1785,7 +1933,7 @@ export async function uploadGroupAvatar(
   const ext = ALLOWED_AVATAR_MIME_TYPES[normalizedMime];
   if (!ext) {
     throw new Error(
-      `Unsupported avatar image format: ${options.mimeType}. Allowed: jpeg, png, webp, gif, svg`
+      `Unsupported avatar image format: ${options.mimeType}. Allowed: jpeg, png, webp, gif`
     );
   }
 

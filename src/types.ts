@@ -2,6 +2,8 @@ import type { UserRow, SessionRow, FriendRow, BlacklistRow, BotRow } from './db/
 
 export interface Env {
   DB: D1Database;
+  GROUP_MASTER_DO?: DurableObjectNamespace;
+  GROUP_BROADCASTER_DO?: DurableObjectNamespace;
   VOICE_BUCKET: R2Bucket;
   // 权益快照 bucket（契约 §2）；未绑定时回退 VOICE_BUCKET + entitlements/ 前缀
   ENTITLEMENT_BUCKET?: R2Bucket;

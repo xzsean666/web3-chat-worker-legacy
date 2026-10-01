@@ -3,14 +3,19 @@ import type { AppEnv } from '../types';
 import { validateSession } from '../services/auth';
 
 export const authMiddleware = createMiddleware<AppEnv>(async (c, next) => {
+  let token = '';
   const authHeader = c.req.header('Authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return c.json({ error: 'Unauthorized: missing or invalid authorization header' }, 401);
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.substring(7).trim();
+  } else {
+    const queryToken = c.req.query('token');
+    if (queryToken) {
+      token = queryToken.trim();
+    }
   }
 
-  const token = authHeader.substring(7).trim();
   if (!token) {
-    return c.json({ error: 'Unauthorized: empty bearer token' }, 401);
+    return c.json({ error: 'Unauthorized: missing or invalid authorization header' }, 401);
   }
 
   const auth = await validateSession(c.env.DB, token);

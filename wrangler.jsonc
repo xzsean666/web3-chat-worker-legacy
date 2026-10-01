@@ -23,6 +23,24 @@
 			"remote": true
 		}
 	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "GROUP_MASTER_DO",
+				"class_name": "GroupMasterDO"
+			},
+			{
+				"name": "GROUP_BROADCASTER_DO",
+				"class_name": "GroupBroadcasterDO"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["GroupMasterDO", "GroupBroadcasterDO"]
+		}
+	],
 	"r2_buckets": [
 		{
 			"binding": "VOICE_BUCKET",

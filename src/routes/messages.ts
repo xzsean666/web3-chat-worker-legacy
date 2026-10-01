@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { authMiddleware } from '../middleware/auth';
+import { allow } from '../services/rateLimit';
 import {
   sendMessage,
   getConversationMessages,
@@ -13,7 +14,8 @@ import {
 
 const messageRoutes = new Hono<AppEnv>();
 
-messageRoutes.use('*', authMiddleware);
+messageRoutes.use('/conversations/*', authMiddleware);
+messageRoutes.use('/messages/*', authMiddleware);
 
 interface BatchAckBody {
   message_ids?: string[];
@@ -27,9 +29,49 @@ messageRoutes.post('/conversations/:id/messages', async (c) => {
   try {
     const user = c.get('user');
     const conversationId = c.req.param('id');
+
+    // 限流保护：普通发言 120条/分钟
+    if (!(await allow(c.env.DB, 'send_msg', user.id, 120))) {
+      return c.json({ error: 'RATE_LIMITED' }, 429);
+    }
+
     const body = (await c.req.json<SendMessageOptions>().catch(() => ({}))) as SendMessageOptions;
 
     const message = await sendMessage(c.env.DB, conversationId, user.id, body);
+
+    // 联动优化：若是群聊且配置了 GROUP_MASTER_DO，向 MasterDO 同步以触发在线 WebSocket 即时广播
+    if (c.env.GROUP_MASTER_DO && !conversationId.startsWith('direct:')) {
+      try {
+        const masterId = c.env.GROUP_MASTER_DO.idFromName(conversationId);
+        const stub = c.env.GROUP_MASTER_DO.get(masterId);
+        const broadcastPromise = stub.fetch('http://internal/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: message.id,
+            conversationId,
+            senderId: user.id,
+            type: message.type,
+            content: message.content,
+            createdAt: message.created_at,
+            skipD1WriteBack: true, // 已在上方写过 D1，避免二次冗余落盘
+            asyncBroadcast: true,
+          }),
+        }).catch((e) => console.error('[HTTP->DO Broadcast failed]:', e));
+        let executionCtx: any;
+        try {
+          executionCtx = c.executionCtx;
+        } catch {}
+        if (executionCtx) {
+          executionCtx.waitUntil(broadcastPromise);
+        } else {
+          await broadcastPromise;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     return c.json(message, 201);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') || err.message.includes('blocked') || err.message.includes('muted') ? 403 : 400;
@@ -42,11 +84,13 @@ messageRoutes.get('/conversations/:id/messages', async (c) => {
     const user = c.get('user');
     const conversationId = c.req.param('id');
     const after_id = c.req.query('after_id');
+    const before_id = c.req.query('before_id');
     const limitStr = c.req.query('limit');
     const limit = limitStr ? parseInt(limitStr, 10) : undefined;
 
     const result = await getConversationMessages(c.env.DB, conversationId, user.id, {
       after_id,
+      before_id,
       limit,
     });
     return c.json(result);
@@ -148,6 +192,33 @@ messageRoutes.post('/messages/:id/recall', async (c) => {
       : 30;
 
     const result = await recallMessage(c.env.DB, c.env.VOICE_BUCKET, user.id, messageId, windowSeconds);
+
+    // 联动优化：通知 MasterDO 向全网 WebSocket 广播撤回事件
+    if (c.env.GROUP_MASTER_DO) {
+      try {
+        const msgRow = await c.env.DB.prepare('SELECT conversation_id FROM messages WHERE id = ?').bind(messageId).first<{ conversation_id: string }>();
+        if (msgRow?.conversation_id && !msgRow.conversation_id.startsWith('direct:')) {
+          const masterId = c.env.GROUP_MASTER_DO.idFromName(msgRow.conversation_id);
+          const stub = c.env.GROUP_MASTER_DO.get(masterId);
+          const recallPromise = stub.fetch('http://internal/recall', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              messageId,
+              conversationId: msgRow.conversation_id,
+            }),
+          }).catch((e) => console.error('[Recall->DO Broadcast failed]:', e));
+          if (c.executionCtx) {
+            c.executionCtx.waitUntil(recallPromise);
+          } else {
+            await recallPromise;
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     return c.json(result);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized')

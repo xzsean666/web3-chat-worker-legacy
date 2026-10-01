@@ -22,5 +22,13 @@
 | [TASK-018](tasks/TASK-018.md) | D1 Write Batching & Auto-Batching Engine Optimization | TASK-017 | DONE | D1WriteBatcher, withAutoBatch transparent proxy, RYOW pre-flush, statement chunking, and service batch writes |
 | [TASK-019](tasks/TASK-019.md) | Telegram-like Bot System (Registration, Control & Open API Operations) | TASK-018 | DONE | Bot registration, virtual users, multiple credential auth, messaging, sync, and group administration |
 | [TASK-020](tasks/TASK-020.md) | Comprehensive Performance Optimization (D1, CPU, R2 IO, In-Memory Caches & Auto-Batching) | TASK-019 | DONE | Covering/FK indexes migration, native base64 CPU boost, N+1 fix, D1 batching, isolate cache, R2 concurrency |
+| [TASK-021](tasks/TASK-021.md) | 100K-Member Supergroup Architecture with Hierarchical Durable Objects, SQLite Storage & WebSockets | TASK-020 | DONE | GroupMasterDO, GroupBroadcasterDO, Hibernatable WS, 100ms coalescing, watermark ACK, and Auto-Batch |
+| [TASK-022](tasks/TASK-022.md) | Decentralized Bot Specification V1.0 Alignment & Extensions | TASK-021 | DONE | bot_tasks, bot_audit_logs, structured events (/events), fixed capacity limit, scheduled tasks cron |
+| [TASK-023](tasks/TASK-023.md) | Group Chat Production Hardening: Security, Performance & DO Optimizations | TASK-022 | DONE | SVG XSS fix, nosniff/CSP headers, protected metadata filtering, input bounds, rate limiting, leave/kick WS disconnect, DO multimedia broadcast, active shard unregister, watermark D1 sync, and bidirectional pagination |
+| [TASK-024](tasks/TASK-024.md) | Comprehensive Audit & Production Hardening (Security, Storage & Performance) | TASK-023 | DONE | Image attachment Stored XSS defense (nosniff & SVG CSP sandbox), EVM block time drift tolerance (+120s), feed video storage lifecycle purge, default bot flood protection, rate limit D1 cleanup throttling, and route middleware scoping |
+| [TASK-025](tasks/TASK-025.md) | Group Chat End-to-End Optimization (Cursor Pagination, DO Cache Invalidation, Supergroup Capacity Tiers & Composite Index) | TASK-024 | DONE | Group member cursor pagination, instant MasterDO cache invalidation on kick/mute/role changes, supergroup capacity tiers expansion up to 100K, and composite database indexes |
+| [TASK-026](tasks/TASK-026.md) | Supergroup Architecture Hardening (Async Fan-out, Adaptive Flood Damping & Subrequest Pooling) | TASK-025 | DONE | Non-blocking async fan-out RPCs, 10-shard subrequest pooling, adaptive velocity flood damping, compact WebSocket frames, and fast-path DO integration |
+
+
 
 

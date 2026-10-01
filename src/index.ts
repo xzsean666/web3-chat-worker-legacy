@@ -32,6 +32,7 @@ import { withAutoBatch, isAutoBatchD1 } from './db';
 
 import { botRoutes } from './routes/bots';
 import { botOperationsRoutes } from './routes/botOperations';
+import { runBotTasksTick } from './services/bots';
 
 const app = new Hono<AppEnv>();
 
@@ -104,6 +105,8 @@ app.route('/', messageRoutes);
 app.route('/sync', syncRoutes);
 
 export { app };
+export { GroupMasterDO } from './durable/GroupMasterDO';
+export { GroupBroadcasterDO } from './durable/GroupBroadcasterDO';
 
 // 存储生命周期按小时降频：cron 每分钟触发，但同一小时内只跑一轮全量清理。
 let lastStorageLifecycleHour = -1;
@@ -124,7 +127,11 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     const db = withAutoBatch(env.DB, { ctx });
     const scheduledEnv: Env = { ...env, DB: db };
-    const tasks: Promise<unknown>[] = [sweepExpiredMessages(db, env.VOICE_BUCKET), runPaymentsTick(scheduledEnv)];
+    const tasks: Promise<unknown>[] = [
+      sweepExpiredMessages(db, env.VOICE_BUCKET),
+      runPaymentsTick(scheduledEnv),
+      runBotTasksTick(scheduledEnv),
+    ];
     if (dividendIndexerEnabled(scheduledEnv)) {
       tasks.push(runDividendIndexTick(scheduledEnv));
     }

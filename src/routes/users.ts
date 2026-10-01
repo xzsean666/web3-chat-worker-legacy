@@ -136,7 +136,12 @@ userRoutes.get('/:address/avatar', async (c) => {
     const headers: Record<string, string> = {
       'Content-Type': result.mimeType,
       'Cache-Control': 'public, max-age=3600',
+      'X-Content-Type-Options': 'nosniff',
     };
+
+    if (result.mimeType.includes('svg')) {
+      headers['Content-Security-Policy'] = "default-src 'none'; sandbox";
+    }
 
     if (result.object.httpEtag) {
       headers['ETag'] = result.object.httpEtag;

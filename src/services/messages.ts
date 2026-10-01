@@ -19,8 +19,12 @@ export interface SendMessageOptions {
   mentions?: string[];
 }
 
+export const MAX_MESSAGE_CONTENT_LENGTH = 4000;
+export const MAX_MENTIONS_COUNT = 50;
+
 export interface GetMessagesOptions {
   after_id?: string;
+  before_id?: string;
   limit?: number;
 }
 
@@ -68,6 +72,12 @@ export async function sendMessage(
   const type = options.type || 'text';
   if (type === 'text' && (!options.content || !options.content.trim())) {
     throw new Error('Message content cannot be empty for text messages');
+  }
+  if (options.content && options.content.length > MAX_MESSAGE_CONTENT_LENGTH) {
+    throw new Error(`Message content exceeds maximum limit of ${MAX_MESSAGE_CONTENT_LENGTH} characters`);
+  }
+  if (Array.isArray(options.mentions) && options.mentions.length > MAX_MENTIONS_COUNT) {
+    throw new Error(`Mentions count exceeds maximum limit of ${MAX_MENTIONS_COUNT}`);
   }
   // sticker 消息：content 为 R2 贴纸键主体（分类/文件名，不含 webp/ 前缀与 .webp 后缀），
   // 形如 animated/U+2764_1、flags/CN；二进制由公开路由 GET /stickers/<content>.webp 提供。
@@ -127,7 +137,7 @@ export async function getConversationMessages(
   conversationId: string,
   userId: string,
   options: GetMessagesOptions = {}
-): Promise<{ messages: MessageWithSender[]; next_cursor: string | null; has_more: boolean }> {
+): Promise<{ messages: MessageWithSender[]; next_cursor: string | null; prev_cursor?: string | null; has_more: boolean }> {
   const membership = await db.prepare(
     'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
   ).bind(conversationId, userId).first();
@@ -141,8 +151,55 @@ export async function getConversationMessages(
 
   let query: string;
   let params: unknown[];
+  let isBackward = false;
 
-  if (options.after_id) {
+  if (options.before_id) {
+    const cursorMsg = await db.prepare(
+      'SELECT created_at FROM messages WHERE id = ? AND conversation_id = ?'
+    ).bind(options.before_id, conversationId).first<{ created_at: number }>();
+
+    if (cursorMsg) {
+      isBackward = true;
+      query = `
+        SELECT m.*, u.wallet_address AS sender_address
+        FROM messages m
+        JOIN users u ON u.id = m.sender_id
+        WHERE m.conversation_id = ?
+          AND m.expires_at > ?
+          AND NOT (
+            m.retention = 'on_read'
+            AND EXISTS (
+              SELECT 1 FROM message_receipts mr
+              WHERE mr.message_id = m.id AND mr.user_id = ? AND mr.status = 'read'
+                AND (? - mr.timestamp) >= (COALESCE(m.burn_after_seconds, 30) * 1000)
+            )
+          )
+          AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))
+        ORDER BY m.created_at DESC, m.id DESC
+        LIMIT ?
+      `;
+      params = [conversationId, now, userId, now, cursorMsg.created_at, cursorMsg.created_at, options.before_id, limit + 1];
+    } else {
+      query = `
+        SELECT m.*, u.wallet_address AS sender_address
+        FROM messages m
+        JOIN users u ON u.id = m.sender_id
+        WHERE m.conversation_id = ?
+          AND m.expires_at > ?
+          AND NOT (
+            m.retention = 'on_read'
+            AND EXISTS (
+              SELECT 1 FROM message_receipts mr
+              WHERE mr.message_id = m.id AND mr.user_id = ? AND mr.status = 'read'
+                AND (? - mr.timestamp) >= (COALESCE(m.burn_after_seconds, 30) * 1000)
+            )
+          )
+        ORDER BY m.created_at ASC, m.id ASC
+        LIMIT ?
+      `;
+      params = [conversationId, now, userId, now, limit + 1];
+    }
+  } else if (options.after_id) {
     const cursorMsg = await db.prepare(
       'SELECT created_at FROM messages WHERE id = ? AND conversation_id = ?'
     ).bind(options.after_id, conversationId).first<{ created_at: number }>();
@@ -211,13 +268,18 @@ export async function getConversationMessages(
   const res = await db.prepare(query).bind(...params).all<MessageWithSender>();
   const rows = res.results;
   const has_more = rows.length > limit;
-  const messages = has_more ? rows.slice(0, limit) : rows;
-  const enriched = await enrichMessagesWithMedia(db, messages);
+  let rawMessages = has_more ? rows.slice(0, limit) : rows;
+  if (isBackward) {
+    rawMessages = rawMessages.reverse();
+  }
+  const enriched = await enrichMessagesWithMedia(db, rawMessages);
   const next_cursor = enriched.length > 0 ? enriched[enriched.length - 1].id : null;
+  const prev_cursor = enriched.length > 0 ? enriched[0].id : null;
 
   return {
     messages: enriched,
     next_cursor,
+    prev_cursor,
     has_more,
   };
 }

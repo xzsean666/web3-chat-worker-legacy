@@ -29,6 +29,7 @@ import {
   listGroupJoinRequests,
   searchPublicGroups,
   transferGroupOwnership,
+  findOrCreateUser,
   type GroupMarquee,
 } from '../services/conversations';
 
@@ -42,6 +43,8 @@ function capacityResponse(c: any, err: unknown): Response | null {
   return null;
 }
 
+import { allow } from '../services/rateLimit';
+
 // club 门禁错误统一映射（持仓不足 403 带 required/current；链未配置/RPC 全挂 500）
 function joinGateResponse(c: any, err: unknown): Response | null {
   if (err instanceof HoldingsGateError) {
@@ -51,6 +54,76 @@ function joinGateResponse(c: any, err: unknown): Response | null {
     return c.json({ error: 'JOIN_GATE_NOT_CONFIGURED', details: [err.message] }, 500);
   }
   return null;
+}
+
+// 强制断开指定用户的群 WebSocket 连接（退群、被踢、封禁）
+function disconnectGroupWebSocket(
+  c: any,
+  groupId: string,
+  userId: string
+): void {
+  const env = c?.env;
+  if (!env?.GROUP_BROADCASTER_DO) return;
+  try {
+    const TOTAL_SHARDS = 50;
+    let hash = 0;
+    const uid = userId.toLowerCase();
+    for (let i = 0; i < uid.length; i++) hash = (hash * 31 + uid.charCodeAt(i)) >>> 0;
+    const shardId = hash % TOTAL_SHARDS;
+    const shardName = `${groupId}:shard_${shardId}`;
+    const doId = env.GROUP_BROADCASTER_DO.idFromName(shardName);
+    const stub = env.GROUP_BROADCASTER_DO.get(doId);
+    const kickPromise = stub.fetch('http://internal/kick_user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId }),
+    }).catch(() => {});
+
+    try {
+      if (c?.executionCtx) {
+        c.executionCtx.waitUntil(kickPromise);
+        return;
+      }
+    } catch {
+      // ignore missing executionCtx in tests
+    }
+    void kickPromise;
+  } catch {
+    // ignore
+  }
+}
+
+// 强制通知 MasterDO 立即失效内存中用户的发言限流与角色权限状态
+function notifyMasterDOInvalidateCache(
+  c: any,
+  groupId: string,
+  userId: string,
+  action: 'kick' | 'leave' | 'mute' | 'unmute' | 'role_change' | 'join',
+  mutedUntil?: number | null
+): void {
+  const env = c?.env;
+  if (!env?.GROUP_MASTER_DO) return;
+  try {
+    const masterId = env.GROUP_MASTER_DO.idFromName(groupId);
+    const stub = env.GROUP_MASTER_DO.get(masterId);
+    const invalidatePromise = stub.fetch('http://internal/invalidate_cache', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, action, mutedUntil }),
+    }).catch(() => {});
+
+    try {
+      if (c?.executionCtx) {
+        c.executionCtx.waitUntil(invalidatePromise);
+        return;
+      }
+    } catch {
+      // ignore missing executionCtx in tests
+    }
+    void invalidatePromise;
+  } catch {
+    // ignore
+  }
 }
 
 interface CreateGroupBody {
@@ -162,14 +235,17 @@ groupRoutes.get('/:id', async (c) => {
   }
 });
 
-// 0b. List group members (includes group_nickname per member)
+// 0b. List group members (includes group_nickname per member, with optional cursor pagination)
 groupRoutes.get('/:id/members', async (c) => {
   try {
     const user = c.get('user');
     const groupId = c.req.param('id');
+    const limitQuery = c.req.query('limit');
+    const cursor = c.req.query('cursor');
+    const limit = limitQuery !== undefined ? Math.max(1, parseInt(limitQuery, 10) || 50) : undefined;
 
-    const members = await getGroupMembers(c.env.DB, groupId, user.id);
-    return c.json({ members });
+    const result = await getGroupMembers(c.env.DB, groupId, user.id, { limit, cursor });
+    return c.json(result);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : err.message.includes('not found') ? 404 : 400;
     return c.json({ error: err.message }, status);
@@ -200,6 +276,9 @@ groupRoutes.patch('/:id/members/me', async (c) => {
 groupRoutes.post('/', async (c) => {
   try {
     const user = c.get('user');
+    if (!(await allow(c.env.DB, 'create_group', user.id, 10))) {
+      return c.json({ error: 'RATE_LIMITED' }, 429);
+    }
     const body = (await c.req.json<CreateGroupBody>().catch(() => ({}))) as CreateGroupBody;
     if (!body.name) {
       return c.json({ error: 'Group name is required' }, 400);
@@ -241,6 +320,9 @@ groupRoutes.post('/', async (c) => {
 groupRoutes.post('/:id/invite-links', async (c) => {
   try {
     const user = c.get('user');
+    if (!(await allow(c.env.DB, 'create_invite', user.id, 20))) {
+      return c.json({ error: 'RATE_LIMITED' }, 429);
+    }
     const body = (await c.req.json<CreateInviteLinkBody>().catch(() => ({}))) as CreateInviteLinkBody;
     const invite = await createGroupInviteLink(c.env.DB, c.req.param('id'), user.id, body);
     return c.json(invite, 201);
@@ -260,6 +342,9 @@ groupRoutes.post('/:id/invite-links', async (c) => {
 groupRoutes.post('/join-by-token', async (c) => {
   try {
     const user = c.get('user');
+    if (!(await allow(c.env.DB, 'join_by_token', user.id, 30))) {
+      return c.json({ error: 'RATE_LIMITED' }, 429);
+    }
     const body = (await c.req.json<JoinByTokenBody>().catch(() => ({}))) as JoinByTokenBody;
     if (!body.token?.trim()) return c.json({ error: 'token is required' }, 400);
     const result = await joinGroupByInviteToken(c.env.DB, body.token.trim(), user, body.message, body.retry === true);
@@ -286,6 +371,9 @@ groupRoutes.post('/join-by-token', async (c) => {
 groupRoutes.post('/:id/join-requests', async (c) => {
   try {
     const user = c.get('user');
+    if (!(await allow(c.env.DB, 'join_request', user.id, 10))) {
+      return c.json({ error: 'RATE_LIMITED' }, 429);
+    }
     const body = (await c.req.json<CreateJoinRequestBody>().catch(() => ({}))) as CreateJoinRequestBody;
     const request = await createGroupJoinRequest(c.env.DB, c.req.param('id'), user, body.message);
     return c.json(request, 201);
@@ -300,6 +388,9 @@ groupRoutes.post('/:id/join-requests', async (c) => {
 groupRoutes.post('/:id/join', async (c) => {
   try {
     const user = c.get('user');
+    if (!(await allow(c.env.DB, 'join_group', user.id, 30))) {
+      return c.json({ error: 'RATE_LIMITED' }, 429);
+    }
     const result = await joinPublicGroup(c.env.DB, c.req.param('id'), user);
     if (result.status === 'requires_payment') {
       if (result.group.avatar_url?.startsWith('/')) {
@@ -426,6 +517,8 @@ groupRoutes.post('/:id/leave', async (c) => {
     const groupId = c.req.param('id');
 
     const result = await leaveGroup(c.env.DB, groupId, user.id, c.env.VOICE_BUCKET);
+    disconnectGroupWebSocket(c, groupId, user.id);
+    notifyMasterDOInvalidateCache(c, groupId, user.id, 'leave');
     return c.json(result);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : err.message.includes('not found') ? 404 : 400;
@@ -461,6 +554,16 @@ groupRoutes.post('/:id/kick', async (c) => {
     }
 
     const result = await removeGroupMember(c.env.DB, groupId, user.id, target, c.env.VOICE_BUCKET);
+
+    // 联动优化：强制关闭被踢用户的 WebSocket 连接并通知 MasterDO 缓存失效
+    let resolvedUserId = target;
+    try {
+      const resolved = await findOrCreateUser(c.env.DB, target);
+      if (resolved?.id) resolvedUserId = resolved.id;
+    } catch {}
+    disconnectGroupWebSocket(c, groupId, resolvedUserId);
+    notifyMasterDOInvalidateCache(c, groupId, resolvedUserId, 'kick');
+
     return c.json(result);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : err.message.includes('not found') ? 404 : 400;
@@ -476,6 +579,16 @@ groupRoutes.delete('/:id/members/:userId', async (c) => {
     const targetUserId = c.req.param('userId');
 
     const result = await removeGroupMember(c.env.DB, groupId, user.id, targetUserId, c.env.VOICE_BUCKET);
+
+    // 联动优化：强制关闭被移出群成员的 WebSocket 连接并通知 MasterDO 缓存失效
+    let resolvedUserId = targetUserId;
+    try {
+      const resolved = await findOrCreateUser(c.env.DB, targetUserId);
+      if (resolved?.id) resolvedUserId = resolved.id;
+    } catch {}
+    disconnectGroupWebSocket(c, groupId, resolvedUserId);
+    notifyMasterDOInvalidateCache(c, groupId, resolvedUserId, 'kick');
+
     return c.json(result);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : err.message.includes('not found') ? 404 : 400;
@@ -496,6 +609,7 @@ groupRoutes.put('/:id/members/:userId/role', async (c) => {
     }
 
     const updated = await updateMemberRole(c.env.DB, groupId, user.id, targetUserId, body.role);
+    notifyMasterDOInvalidateCache(c, groupId, targetUserId, 'role_change');
     return c.json(updated);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : err.message.includes('not found') ? 404 : 400;
@@ -515,6 +629,7 @@ groupRoutes.post('/:id/mute', async (c) => {
       muted,
       duration_seconds: body.duration_seconds,
     });
+    notifyMasterDOInvalidateCache(c, groupId, '*', 'mute', result.mute_until);
     return c.json(result);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : err.message.includes('not found') ? 404 : 400;
@@ -528,6 +643,7 @@ groupRoutes.post('/:id/unmute', async (c) => {
     const groupId = c.req.param('id');
 
     const result = await setGroupMute(c.env.DB, groupId, user.id, { muted: false });
+    notifyMasterDOInvalidateCache(c, groupId, '*', 'unmute');
     return c.json(result);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : err.message.includes('not found') ? 404 : 400;
@@ -549,6 +665,7 @@ groupRoutes.post('/:id/members/:userId/mute', async (c) => {
       duration_seconds: body.duration_seconds,
       reason: body.reason,
     });
+    notifyMasterDOInvalidateCache(c, groupId, targetUserId, 'mute', result.muted_until);
     return c.json(result);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : err.message.includes('not found') ? 404 : 400;
@@ -563,6 +680,7 @@ groupRoutes.post('/:id/members/:userId/unmute', async (c) => {
     const targetUserId = c.req.param('userId');
 
     const result = await setMemberMute(c.env.DB, groupId, user.id, targetUserId, { muted: false });
+    notifyMasterDOInvalidateCache(c, groupId, targetUserId, 'unmute');
     return c.json(result);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : err.message.includes('not found') ? 404 : 400;
@@ -642,7 +760,12 @@ groupRoutes.get('/:id/avatar', async (c) => {
     const headers: Record<string, string> = {
       'Content-Type': result.mimeType,
       'Cache-Control': 'private, max-age=300',
+      'X-Content-Type-Options': 'nosniff',
     };
+
+    if (result.mimeType.includes('svg')) {
+      headers['Content-Security-Policy'] = "default-src 'none'; sandbox";
+    }
 
     if (result.object.httpEtag) {
       headers['ETag'] = result.object.httpEtag;
@@ -658,4 +781,155 @@ groupRoutes.get('/:id/avatar', async (c) => {
   }
 });
 
+// 13. Supergroup 100K-Member WebSocket Endpoint
+groupRoutes.get('/:id/ws', async (c) => {
+  try {
+    const user = c.get('user');
+    const groupId = c.req.param('id');
+
+    // 检查群组存在性与成员资格 (轻量级单点查询，绝不全表加载 10 万成员数据防 OOM)
+    const conv = await c.env.DB.prepare('SELECT id, type FROM conversations WHERE id = ?').bind(groupId).first<{ id: string; type: string }>();
+    if (!conv || !isGroupLike(conv.type)) {
+      return c.json({ error: 'Conversation not found' }, 404);
+    }
+
+    const membership = await c.env.DB.prepare(
+      'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
+    ).bind(groupId, user.id).first<{ role: string }>();
+    if (!membership) {
+      return c.json({ error: 'Forbidden: not a member of this group' }, 403);
+    }
+
+    if (!c.env.GROUP_BROADCASTER_DO) {
+      return c.json({ error: 'DURABLE_OBJECT_NOT_BOUND' }, 503);
+    }
+
+    // 计算分片哈希 (默认 50 个分片均衡承载 10 万连接)
+    const TOTAL_SHARDS = 50;
+    let hash = 0;
+    const uid = user.id.toLowerCase();
+    for (let i = 0; i < uid.length; i++) {
+      hash = (hash * 31 + uid.charCodeAt(i)) >>> 0;
+    }
+    const shardId = hash % TOTAL_SHARDS;
+    const shardName = `${groupId}:shard_${shardId}`;
+
+    const doId = c.env.GROUP_BROADCASTER_DO.idFromName(shardName);
+    const stub = c.env.GROUP_BROADCASTER_DO.get(doId);
+
+    const wsUrl = new URL(c.req.url);
+    wsUrl.searchParams.set('user_id', user.id);
+    wsUrl.searchParams.set('group_id', groupId);
+    wsUrl.searchParams.set('shard_id', String(shardId));
+    wsUrl.searchParams.set('role', membership.role || 'member');
+
+    const forwardReq = new Request(wsUrl.toString(), {
+      method: 'GET',
+      headers: c.req.raw.headers,
+    });
+
+    return stub.fetch(forwardReq);
+  } catch (err: any) {
+    return c.json({ error: err.message || 'INTERNAL_ERROR' }, 500);
+  }
+});
+
+// 14. Supergroup 监控指标与运行时数据 (群成员/管理员权限守卫)
+groupRoutes.get('/:id/supergroup/stats', async (c) => {
+  try {
+    const user = c.get('user');
+    const groupId = c.req.param('id');
+
+    const membership = await c.env.DB.prepare(
+      'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
+    ).bind(groupId, user.id).first<{ role: string }>();
+    if (!membership) {
+      return c.json({ error: 'Forbidden: not a member of this group' }, 403);
+    }
+
+    if (!c.env.GROUP_MASTER_DO) {
+      return c.json({ error: 'DURABLE_OBJECT_NOT_BOUND' }, 503);
+    }
+    const masterId = c.env.GROUP_MASTER_DO.idFromName(groupId);
+    const stub = c.env.GROUP_MASTER_DO.get(masterId);
+    const res = await stub.fetch('http://internal/stats');
+    const stats = (await res.json()) as Record<string, unknown>;
+    return c.json({ group_id: groupId, ...stats });
+  } catch (err: any) {
+    return c.json({ error: err.message || 'INTERNAL_ERROR' }, 500);
+  }
+});
+
+// 15. Supergroup 历史消息（基于绝对自增 seq 拉取）
+groupRoutes.get('/:id/supergroup/messages', async (c) => {
+  try {
+    const user = c.get('user');
+    const groupId = c.req.param('id');
+    const membership = await c.env.DB.prepare(
+      'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
+    ).bind(groupId, user.id).first<{ role: string }>();
+    if (!membership) {
+      return c.json({ error: 'Forbidden: not a member of this group' }, 403);
+    }
+
+    if (!c.env.GROUP_MASTER_DO) {
+      return c.json({ error: 'DURABLE_OBJECT_NOT_BOUND' }, 503);
+    }
+
+    const sinceSeq = c.req.query('since_seq');
+    const beforeSeq = c.req.query('before_seq');
+    const limit = c.req.query('limit') || '50';
+    const masterId = c.env.GROUP_MASTER_DO.idFromName(groupId);
+    const stub = c.env.GROUP_MASTER_DO.get(masterId);
+    let url = `http://internal/messages?limit=${limit}`;
+    if (beforeSeq) {
+      url += `&before_seq=${beforeSeq}`;
+    } else if (sinceSeq) {
+      url += `&since_seq=${sinceSeq}`;
+    }
+    const res = await stub.fetch(url);
+    const data = await res.json();
+    return c.json(data);
+  } catch (err: any) {
+    return c.json({ error: err.message || 'INTERNAL_ERROR' }, 500);
+  }
+});
+
+// 16. Supergroup 慢速发言模式配置 (群主与管理员专属)
+groupRoutes.post('/:id/slow-mode', async (c) => {
+  try {
+    const user = c.get('user');
+    const groupId = c.req.param('id');
+    const membership = await c.env.DB.prepare(
+      'SELECT role FROM conversation_members WHERE conversation_id = ? AND user_id = ?'
+    ).bind(groupId, user.id).first<{ role: string }>();
+    if (!membership || (membership.role !== 'owner' && membership.role !== 'admin')) {
+      return c.json({ error: 'Unauthorized: only owner or admin can configure slow mode' }, 403);
+    }
+
+    const body = (await c.req.json().catch(() => ({}))) as { seconds?: number };
+    const seconds = Math.max(0, Math.min(Number(body.seconds) || 0, 3600));
+
+    if (!c.env.GROUP_MASTER_DO) {
+      return c.json({ error: 'DURABLE_OBJECT_NOT_BOUND' }, 503);
+    }
+
+    const masterId = c.env.GROUP_MASTER_DO.idFromName(groupId);
+    const stub = c.env.GROUP_MASTER_DO.get(masterId);
+    const res = await stub.fetch('http://internal/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'slow_mode_seconds', value: seconds }),
+    });
+
+    if (res.ok) {
+      return c.json({ success: true, group_id: groupId, slow_mode_seconds: seconds });
+    }
+    return c.json({ error: 'Failed to configure slow mode' }, 500);
+  } catch (err: any) {
+    return c.json({ error: err.message || 'INTERNAL_ERROR' }, 500);
+  }
+});
+
 export { groupRoutes };
+

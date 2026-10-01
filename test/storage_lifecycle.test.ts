@@ -62,12 +62,12 @@ async function insertEvidence(objectKey: string, reportId: string | null, create
     .run();
 }
 
-async function insertFeedPost(id: string, images: string[], isDeleted: number, createdAt: number) {
+async function insertFeedPost(id: string, images: string[], isDeleted: number, createdAt: number, video: string | null = null) {
   await db
     .prepare(
-      'INSERT INTO feed_posts (id, author_id, content, images, like_count, is_deleted, created_at) VALUES (?, ?, ?, ?, 0, ?, ?)'
+      'INSERT INTO feed_posts (id, author_id, content, images, like_count, is_deleted, created_at, video) VALUES (?, ?, ?, ?, 0, ?, ?, ?)'
     )
-    .bind(id, 'u1', 'content', JSON.stringify(images), isDeleted, createdAt)
+    .bind(id, 'u1', 'content', JSON.stringify(images), isDeleted, createdAt, video)
     .run();
 }
 
@@ -161,13 +161,13 @@ async function seedAllStaleRows() {
     .run();
   await insertEvidence('report-evidence/u1/attached-old.png', 'rep1', now - 40 * DAY);
 
-  // feed_posts：软删 >30 天硬删（feed_likes 级联 + R2 图片）；其余留
-  await insertFeedPost('fp_deleted_old', ['feed/a.png', 'feed/b.png'], 1, now - 31 * DAY);
+  // feed_posts：软删 >30 天硬删（feed_likes 级联 + R2 图片与视频）；其余留
+  await insertFeedPost('fp_deleted_old', ['feed/a.png', 'feed/b.png'], 1, now - 31 * DAY, 'feed-videos/v_old.mp4');
   await db
     .prepare('INSERT INTO feed_likes (id, post_id, user_id, created_at) VALUES (?, ?, ?, ?)')
     .bind('like1', 'fp_deleted_old', 'u1', now - 31 * DAY)
     .run();
-  await insertFeedPost('fp_deleted_fresh', ['feed/c.png'], 1, now - 10 * DAY);
+  await insertFeedPost('fp_deleted_fresh', ['feed/c.png'], 1, now - 10 * DAY, 'feed-videos/v_fresh.mp4');
   await insertFeedPost('fp_active_old', ['feed/d.png'], 0, now - 40 * DAY);
 
   // payment_outbox：done 且 updated_at >30 天删（TEXT ISO）
@@ -193,6 +193,8 @@ async function seedAllStaleRows() {
   await r2.put('feed/b.png', new Uint8Array(10));
   await r2.put('feed/c.png', new Uint8Array(10));
   await r2.put('feed/d.png', new Uint8Array(10));
+  await r2.put('feed-videos/v_old.mp4', new Uint8Array(10));
+  await r2.put('feed-videos/v_fresh.mp4', new Uint8Array(10));
 }
 
 beforeEach(async () => {
@@ -257,11 +259,13 @@ describe('runStorageLifecycle 全量规则', () => {
     expect(await db.prepare('SELECT * FROM feed_posts WHERE id = ?').bind('fp_deleted_fresh').first()).not.toBeNull();
     expect(await db.prepare('SELECT * FROM feed_posts WHERE id = ?').bind('fp_active_old').first()).not.toBeNull();
 
-    // R2：被删帖图片与孤儿证据删除，其余保留
+    // R2：被删帖图片与视频、孤儿证据删除，其余保留
     expect(r2.hasKey('feed/a.png')).toBe(false);
     expect(r2.hasKey('feed/b.png')).toBe(false);
+    expect(r2.hasKey('feed-videos/v_old.mp4')).toBe(false);
     expect(r2.hasKey('feed/c.png')).toBe(true);
     expect(r2.hasKey('feed/d.png')).toBe(true);
+    expect(r2.hasKey('feed-videos/v_fresh.mp4')).toBe(true);
     expect(r2.hasKey('report-evidence/u1/orphan-old.png')).toBe(false);
     expect(r2.hasKey('report-evidence/u1/orphan-fresh.png')).toBe(true);
     expect(r2.hasKey('report-evidence/u1/attached-old.png')).toBe(true);

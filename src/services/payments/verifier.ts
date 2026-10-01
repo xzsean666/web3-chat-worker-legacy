@@ -273,10 +273,12 @@ export async function verifyOrder(
   const createdMs = Date.parse(order.created_at);
   const claimedMs = claim ? Date.parse(claim.claimed_at) : Date.parse(order.updated_at);
   const blockMs = blockTimestamp * 1000;
-  if (blockMs < createdMs - 600_000 || blockMs > claimedMs) {
+  // §5.5 区块时间窗 [created_at − 600s, claimedMs + 120s]（容忍 EVM 节点 120s 未来时钟漂移）
+  const MAX_CLOCK_SKEW_MS = 120_000;
+  if (blockMs < createdMs - 600_000 || blockMs > claimedMs + MAX_CLOCK_SKEW_MS) {
     return failOrder(db, order, 'invalid_block_time', {
       blockTime: new Date(blockMs).toISOString(),
-      window: [new Date(createdMs - 600_000).toISOString(), new Date(claimedMs).toISOString()],
+      window: [new Date(createdMs - 600_000).toISOString(), new Date(claimedMs + MAX_CLOCK_SKEW_MS).toISOString()],
     });
   }
 

@@ -5,38 +5,66 @@ import type { GroupCapacityEntitlementRow } from '../../db/schema';
 import { getActiveConfig } from './config';
 
 export const FREE_CAPACITY = 50;
-export const MAX_CAPACITY = 500;
-const DEFAULT_TIERS = [100, 200, 300, 400, 500];
+export const STANDARD_MAX_CAPACITY = 500;
+export const SUPERGROUP_MAX_CAPACITY = 100_000;
+export const MAX_CAPACITY = SUPERGROUP_MAX_CAPACITY;
+export const DEFAULT_TIERS = [100, 200, 300, 400, 500];
+export const SUPERGROUP_TIERS = [1000, 2000, 5000, 10000, 50000, 100000];
 
 export interface GroupCapacityInfo {
   capacity: number;
   tier: number;
   memberCount: number;
+  isSupergroup?: boolean;
 }
 
 export interface GroupCapacityFull extends GroupCapacityInfo {
   nextTier: number | null;
 }
 
-// 契约 §8 唯一判定函数：capacity = group_capacity_entitlements.capacity_tier（无行 = 50）
+// 契约 §8 唯一判定函数：capacity = group_capacity_entitlements.capacity_tier（无行 = 50），且受群自定义 max_members 上限约束
 export async function getGroupCapacityInfo(db: D1Database, groupId: string): Promise<GroupCapacityInfo> {
   const row = await db
     .prepare('SELECT capacity_tier FROM group_capacity_entitlements WHERE group_id = ?')
     .bind(groupId)
     .first<Pick<GroupCapacityEntitlementRow, 'capacity_tier'>>();
-  const capacity = row?.capacity_tier ?? FREE_CAPACITY;
+  let capacity = row?.capacity_tier ?? FREE_CAPACITY;
+  let isSupergroup = capacity > STANDARD_MAX_CAPACITY;
+
+  try {
+    const convRow = await db
+      .prepare('SELECT metadata FROM conversations WHERE id = ?')
+      .bind(groupId)
+      .first<{ metadata: string }>();
+    if (convRow?.metadata) {
+      const meta = JSON.parse(convRow.metadata);
+      if (meta.is_supergroup === true || meta.supergroup === true) {
+        isSupergroup = true;
+      }
+      if (typeof meta.max_members === 'number' && meta.max_members > 0) {
+        capacity = Math.min(capacity, meta.max_members);
+      }
+    }
+  } catch {}
+
   const memberCount =
     (await db
       .prepare('SELECT COUNT(*) AS n FROM conversation_members WHERE conversation_id = ?')
       .bind(groupId)
       .first<{ n: number }>())?.n ?? 0;
-  return { capacity, tier: capacity, memberCount };
+  return { capacity, tier: row?.capacity_tier ?? FREE_CAPACITY, memberCount, isSupergroup };
 }
 
-// 下一可购档：配置档中第一个 > 当前容量者；无配置用默认档表；已到 500 上限为 null
-export async function computeNextTier(db: D1Database, capacity: number): Promise<number | null> {
+// 下一可购档：配置档中第一个 > 当前容量者；无配置用默认档表；已到上限为 null
+export async function computeNextTier(
+  db: D1Database,
+  capacity: number,
+  isSupergroup?: boolean
+): Promise<number | null> {
   const active = await getActiveConfig(db);
-  const tiers = active?.payload.capacityTiers?.map((t) => t.tier) ?? DEFAULT_TIERS;
+  const tiers =
+    active?.payload.capacityTiers?.map((t) => t.tier) ??
+    (isSupergroup ? [...DEFAULT_TIERS, ...SUPERGROUP_TIERS] : DEFAULT_TIERS);
   return tiers.find((t) => t > capacity) ?? null;
 }
 
@@ -88,5 +116,5 @@ export async function insertMemberWithCapacity(
   if (existing) return { ok: true, already: true };
 
   const fresh = await getGroupCapacityInfo(db, convId);
-  return { ok: false, info: { ...fresh, nextTier: await computeNextTier(db, fresh.capacity) } };
+  return { ok: false, info: { ...fresh, nextTier: await computeNextTier(db, fresh.capacity, fresh.isSupergroup) } };
 }

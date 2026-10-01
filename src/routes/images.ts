@@ -90,6 +90,47 @@ imageRoutes.post('/upload', async (c) => {
       burn_after_seconds: burnAfterSeconds,
     });
 
+    // 联动优化：若是群聊且配置了 GROUP_MASTER_DO，向 MasterDO 同步以触发在线 WebSocket 即时广播
+    if (c.env.GROUP_MASTER_DO && !conversationId.startsWith('direct:')) {
+      try {
+        const masterId = c.env.GROUP_MASTER_DO.idFromName(conversationId);
+        const stub = c.env.GROUP_MASTER_DO.get(masterId);
+        const broadcastPromise = stub.fetch('http://internal/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: result.message.id,
+            conversationId,
+            senderId: user.id,
+            type: 'image',
+            content: result.message.content,
+            metadata: {
+              image_id: result.image.id,
+              file_name: result.image.file_name,
+              mime_type: result.image.mime_type,
+              size: result.image.size,
+              width: result.image.width,
+              height: result.image.height,
+            },
+            createdAt: result.message.created_at,
+            skipD1WriteBack: true,
+            asyncBroadcast: true,
+          }),
+        }).catch((e) => console.error('[HTTP->DO Image Broadcast failed]:', e));
+        let executionCtx: any;
+        try {
+          executionCtx = c.executionCtx;
+        } catch {}
+        if (executionCtx) {
+          executionCtx.waitUntil(broadcastPromise);
+        } else {
+          await broadcastPromise;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     return c.json(result, 201);
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') || err.message.includes('muted') ? 403 : 400;
@@ -124,14 +165,25 @@ imageRoutes.get('/:messageId', async (c) => {
 
     const safeName = metadata.file_name ? encodeURIComponent(metadata.file_name) : `${messageId}`;
 
+    const headers: Record<string, string> = {
+      'Content-Type': metadata.mime_type,
+      'Content-Length': metadata.size.toString(),
+      'Content-Disposition': `inline; filename="${safeName}"`,
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      'X-Content-Type-Options': 'nosniff',
+    };
+
+    if (metadata.mime_type.includes('svg')) {
+      headers['Content-Security-Policy'] = "default-src 'none'; sandbox";
+    }
+
+    if (object.httpEtag) {
+      headers['ETag'] = object.httpEtag;
+    }
+
     return new Response(object.body as any, {
       status: 200,
-      headers: {
-        'Content-Type': metadata.mime_type,
-        'Content-Length': metadata.size.toString(),
-        'Content-Disposition': `inline; filename="${safeName}"`,
-        'Cache-Control': 'no-store, no-cache, must-revalidate',
-      },
+      headers,
     });
   } catch (err: any) {
     const status = err.message.includes('Unauthorized') ? 403 : 404;

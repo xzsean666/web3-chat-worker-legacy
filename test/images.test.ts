@@ -358,4 +358,48 @@ describe('Image Message Storage (R2) & Synchronized Cleanup', () => {
     }, env);
     expect(res2.status).toBe(400);
   });
+
+  it('serves images with nosniff and applies CSP sandbox on SVG image to prevent Stored XSS', async () => {
+    // 1. Upload PNG image
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const pngRes = await app.request('/images/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aliceToken}` },
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        image_base64: Buffer.from(pngBytes).toString('base64'),
+        mime_type: 'image/png',
+      }),
+    }, env);
+    expect(pngRes.status).toBe(201);
+    const pngData = await pngRes.json<any>();
+
+    const pngGet = await app.request(`/images/${pngData.message.id}`, {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    expect(pngGet.status).toBe(200);
+    expect(pngGet.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(pngGet.headers.get('Content-Security-Policy')).toBeNull();
+
+    // 2. Upload SVG image
+    const svgContent = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="10"/></svg>';
+    const svgRes = await app.request('/images/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${aliceToken}` },
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        image_base64: Buffer.from(svgContent).toString('base64'),
+        mime_type: 'image/svg+xml',
+      }),
+    }, env);
+    expect(svgRes.status).toBe(201);
+    const svgData = await svgRes.json<any>();
+
+    const svgGet = await app.request(`/images/${svgData.message.id}`, {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }, env);
+    expect(svgGet.status).toBe(200);
+    expect(svgGet.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(svgGet.headers.get('Content-Security-Policy')).toBe("default-src 'none'; sandbox");
+  });
 });

@@ -165,24 +165,27 @@ async function runReportEvidenceOrphans(db: D1Database, bucket: R2Bucket | undef
   return res.meta?.changes ?? 0;
 }
 
-/** 软删动态：is_deleted=1 且创建 >30 天硬删（feed_likes FK CASCADE），并删 images JSON 数组里的 R2 对象（feed/ 前缀）。 */
+/** 软删动态：is_deleted=1 且创建 >30 天硬删（feed_likes FK CASCADE），并删 images JSON 数组及 video 对应的 R2 对象。 */
 async function runFeedPosts(db: D1Database, bucket: R2Bucket | undefined, dryRun: boolean, now: number): Promise<number> {
   const rows = await db
-    .prepare('SELECT id, images FROM feed_posts WHERE is_deleted = 1 AND created_at < ? LIMIT ?')
+    .prepare('SELECT id, images, video FROM feed_posts WHERE is_deleted = 1 AND created_at < ? LIMIT ?')
     .bind(now - 30 * DAY_MS, BATCH_LIMIT)
-    .all<{ id: string; images: string }>();
+    .all<{ id: string; images: string; video: string | null }>();
   const posts = rows.results ?? [];
   if (dryRun || posts.length === 0) return posts.length;
-  const imageKeys: string[] = [];
+  const mediaKeys: string[] = [];
   for (const post of posts) {
     try {
       const parsed = JSON.parse(post.images);
-      if (Array.isArray(parsed)) imageKeys.push(...parsed.map((k) => String(k)));
+      if (Array.isArray(parsed)) mediaKeys.push(...parsed.map((k) => String(k)));
     } catch (err) {
       console.error(`storageLifecycle: failed to parse images of feed post ${post.id}:`, err);
     }
+    if (post.video) {
+      mediaKeys.push(post.video);
+    }
   }
-  await deleteR2Keys(bucket, imageKeys);
+  await deleteR2Keys(bucket, mediaKeys);
   const placeholders = posts.map(() => '?').join(', ');
   const res = await db
     .prepare(`DELETE FROM feed_posts WHERE id IN (${placeholders})`)
